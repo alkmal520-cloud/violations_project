@@ -10,3 +10,5 @@ pandas
 PyJWT
 openpyxl
 reportlab
+arabic-reshaper
+python-bidi
