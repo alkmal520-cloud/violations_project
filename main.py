@@ -395,19 +395,14 @@ class CaseFullPayload(BaseModel):
 # --- مسارات المصادقة والمستخدمين ---
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.Username == payload.username).first()
+user = db.query(User).filter(User.Username == payload.username).first()
     if not user or not user.IsActive:
-        log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول لحساب غير موجود أو معطل")
-        raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو الحساب معطل أمنياً")
-
-    if not user:
-        raise HTTPException(status_code=401, detail="اسم المستخدم أو كلمة المرور غير صحيحة")
+        raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو معطل")
     token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.Username, "role": user.Role, "fullname": user.FullName or ""},
         expires_delta=token_expires
     )
-    log_audit(db, user.Username, "LOGIN_SUCCESS", "tbl_users", "تم تسجيل الدخول بنجاح")
     return {
         "status": "success",
         "access_token": access_token,
