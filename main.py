@@ -572,18 +572,16 @@ def search_cases(
 
         if q and q.strip():
             term = f"%{q.strip()}%"
-            cond = (
-                Case.VariableCode.ilike(term)
-                | Case.CaseNumber.ilike(term)
-                | Case.DecisionNumber.ilike(term)
-                | Case.NationalID.ilike(term)
-                | Offender.OffenderName.ilike(term)
-                | Location.StreetName.ilike(term)
-                | Location.DistrictName.ilike(term)
+            query = query.filter(
+                (Case.VariableCode.ilike(term))
+                | (Case.CaseNumber.ilike(term))
+                | (Case.DecisionNumber.ilike(term))
+                | (Case.NationalID.ilike(term))
+                | (Offender.OffenderName.ilike(term))
+                | (Location.StreetName.ilike(term))
+                | (Location.DistrictName.ilike(term))
+                | (ExecutionStatus.procedure.ilike(term))
             )
-            if hasattr(ExecutionStatus, "procedure"):
-                cond = cond | ExecutionStatus.procedure.ilike(term)
-            query = query.filter(cond)
 
         if var_code and var_code.strip():
             query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
@@ -597,7 +595,7 @@ def search_cases(
         if national_id and national_id.strip():
             term_nid = f"%{national_id.strip()}%"
             query = query.filter(
-                Case.NationalID.ilike(term_nid) | Offender.NationalID.ilike(term_nid)
+                (Case.NationalID.ilike(term_nid)) | (Offender.NationalID.ilike(term_nid))
             )
 
         if offender and offender.strip():
@@ -606,25 +604,15 @@ def search_cases(
         if address and address.strip():
             term_addr = f"%{address.strip()}%"
             query = query.filter(
-                Location.StreetName.ilike(term_addr) | Location.DistrictName.ilike(term_addr)
+                (Location.StreetName.ilike(term_addr)) | (Location.DistrictName.ilike(term_addr))
             )
 
         if district and district.strip():
             query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
 
         status_val = (status or "").strip()
-        if status_val and hasattr(ExecutionStatus, "procedure"):
+        if status_val:
             query = query.filter(ExecutionStatus.procedure.ilike(f"%{status_val}%"))
-
-        vtype_val = (vtype or v_type or "").strip()
-        if vtype_val and hasattr(Case, "ViolationTypeName"):
-            query = query.filter(Case.ViolationTypeName.ilike(f"%{vtype_val}%"))
-
-        if lat and lat.strip() and hasattr(Case, "Latitude"):
-            query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
-
-        if lon and lon.strip() and hasattr(Case, "Longitude"):
-            query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
 
         if year is not None:
             query = query.filter(Case.year == str(year))
@@ -634,55 +622,69 @@ def search_cases(
         total_count = query.count()
         results = query.offset((page - 1) * limit).limit(limit).all()
 
+        def _clean_id(val):
+            if val is None:
+                return ""
+            s = str(val).strip()
+            if not s or s.lower() in ("none", "null", "nan"):
+                return ""
+            try:
+                f = float(s)
+                if math.isnan(f):
+                    return ""
+                return str(int(f)) if f.is_integer() else s
+            except (ValueError, TypeError):
+                return s
+
         data = []
         for r_case, r_off, r_loc, r_exec in results:
-            off_name = _safe_attr(r_off, "OffenderName", None) or "غير مسجل"
-            raw_nid = _safe_attr(r_off, "NationalID", None) or _safe_attr(r_case, "NationalID", None)
-            off_nid = _safe_num_str(raw_nid)
-            phone_str = _safe_num_str(_safe_attr(r_off, "Phone", None))
+            off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
+            raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
+            off_nid = _clean_id(raw_nid)
+            phone_str = _clean_id(getattr(r_off, "Phone", None) if r_off else None)
 
-            street = _safe_attr(r_loc, "StreetName", "") or ""
-            dist = _safe_attr(r_loc, "DistrictName", "") or ""
-            full_addr = _safe_attr(r_loc, "FullAddress", "") or (
+            street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
+            dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
+            full_addr = (getattr(r_loc, "FullAddress", None) if r_loc else None) or (
                 f"{street} - {dist}".strip(" -") if (street or dist) else ""
             )
 
-            proc_val = _safe_attr(r_exec, "procedure", "") or ""
+            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or ""
             exec_status_name = (
-                _safe_attr(r_exec, "ExecutionStatusName", None)
+                (getattr(r_exec, "ExecutionStatusName", None) if r_exec else None)
                 or proc_val
                 or "تنفيذ جزئي"
             )
 
             data.append({
-                "CaseID": _safe_attr(r_case, "CaseID", None),
-                "SerialNo": _safe_attr(r_case, "SerialNo", "") or "",
-                "VariableCode": _safe_attr(r_case, "VariableCode", "-") or "-",
-                "VariableDate": _safe_attr(r_case, "VariableDate", "") or "",
-                "CaseNumber": _safe_attr(r_case, "CaseNumber", "-") or "-",
-                "CaseDate": _safe_attr(r_case, "CaseDate", "") or "",
-                "DecisionNumber": _safe_attr(r_case, "DecisionNumber", "-") or "-",
-                "DecisionDate": _safe_attr(r_case, "DecisionDate", "") or "",
-                "year": _safe_attr(r_case, "year", "") or "",
-                "StopNumber": _safe_attr(r_case, "StopNumber", "") or "",
-                "AdminNumber": _safe_attr(r_case, "AdminNumber", "") or "",
-                "AreaSize": _safe_attr(r_case, "AreaSize", 0.0) or 0.0,
-                "Notes": _safe_attr(r_case, "Notes", "") or "",
-                "Latitude": _safe_attr(r_case, "Latitude", "") or "",
-                "Longitude": _safe_attr(r_case, "Longitude", "") or "",
+                "CaseID": getattr(r_case, "CaseID", None),
+                "SerialNo": getattr(r_case, "SerialNo", "") or "",
+                "VariableCode": getattr(r_case, "VariableCode", "-") or "-",
+                "VariableDate": getattr(r_case, "VariableDate", "") or "",
+                "CaseNumber": getattr(r_case, "CaseNumber", "-") or "-",
+                "CaseDate": getattr(r_case, "CaseDate", "") or "",
+                "DecisionNumber": getattr(r_case, "DecisionNumber", "-") or "-",
+                "DecisionDate": getattr(r_case, "DecisionDate", "") or "",
+                "year": getattr(r_case, "year", "") or "",
+                "StopNumber": getattr(r_case, "StopNumber", "") or "",
+                "AdminNumber": getattr(r_case, "AdminNumber", "") or "",
+                "AreaSize": getattr(r_case, "AreaSize", 0.0) or 0.0,
+                "Notes": getattr(r_case, "Notes", "") or "",
+                "Latitude": getattr(r_case, "Latitude", "") or "",
+                "Longitude": getattr(r_case, "Longitude", "") or "",
                 "OffenderName": off_name,
                 "OffenderNationalID": off_nid,
-                "OffenderAddress": _safe_attr(r_off, "OffenderAddress", "") or "",
+                "OffenderAddress": (getattr(r_off, "OffenderAddress", None) if r_off else None) or "",
                 "Phone": phone_str,
-                "OffenderNotes": _safe_attr(r_off, "Notes", "") or "",
+                "OffenderNotes": (getattr(r_off, "Notes", None) if r_off else None) or "",
                 "StreetName": street,
                 "DistrictName": dist,
                 "FullAddress": full_addr,
-                "Landmark": _safe_attr(r_loc, "Landmark", "") or "",
+                "Landmark": (getattr(r_loc, "Landmark", None) if r_loc else None) or "",
                 "ExecutionStatusName": exec_status_name,
                 "procedure": proc_val,
-                "ExecutionLevel": _safe_attr(r_exec, "ExecutionLevel", "") or "",
-                "ExecNotes": _safe_attr(r_exec, "Notes", "") or "",
+                "ExecutionLevel": (getattr(r_exec, "ExecutionLevel", None) if r_exec else None) or "",
+                "ExecNotes": (getattr(r_exec, "Notes", None) if r_exec else None) or "",
                 "HasAppeal": False,
                 "CourtDecision": "",
                 "CourtDecisionDate": None,
@@ -699,7 +701,7 @@ def search_cases(
                 "ReconciliationDate": "",
                 "FineAmount": None,
                 "ReconNotes": "",
-                "ViolationTypeName": _safe_attr(r_case, "ViolationTypeName", "") or "",
+                "ViolationTypeName": getattr(r_case, "ViolationTypeName", "") or "",
                 "ViolationDescription": ""
             })
 
