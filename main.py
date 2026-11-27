@@ -4,7 +4,6 @@ import csv
 import io
 import glob
 import json
-import pythoncom
 import subprocess
 import pandas as pd
 from datetime import datetime, timedelta
@@ -19,7 +18,6 @@ from sqlalchemy import create_engine, Column, BigInteger, Text, Boolean, Float, 
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from passlib.context import CryptContext
 import jwt
-import win32com.client
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
