@@ -395,7 +395,7 @@ class CaseFullPayload(BaseModel):
 # --- مسارات المصادقة والمستخدمين ---
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
-user = db.query(User).filter(User.Username == payload.username).first()
+    user = db.query(User).filter(User.Username == payload.username).first()
     if not user or not user.IsActive:
         raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو معطل")
     token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
