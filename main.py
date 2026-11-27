@@ -562,7 +562,7 @@ def search_cases(
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
-    from sqlalchemy import cast, Integer, String, or_
+    from sqlalchemy import String, or_
 
     g = globals()
     sub_names = [
@@ -583,14 +583,8 @@ def search_cases(
     try:
         query = db.query(Case, *[m for _, m in active_subs])
 
-        pk_case = getattr(Case, "CaseID", None)
         for _, sub_model in active_subs:
-            sub_case_col = getattr(sub_model, "CaseID", None)
-            if pk_case is not None and sub_case_col is not None:
-                query = query.outerjoin(
-                    sub_model,
-                    cast(pk_case, Integer) == cast(sub_case_col, Integer),
-                )
+            query = query.outerjoin(sub_model, Case.CaseID == sub_model.CaseID)
 
         sub_map = dict(active_subs)
         m_off = sub_map.get("Offender")
@@ -617,8 +611,6 @@ def search_cases(
             add_str_ilike(q_conds, m_loc, "StreetName", q_val)
             add_str_ilike(q_conds, m_loc, "DistrictName", q_val)
             add_str_ilike(q_conds, m_exec, "procedure", q_val)
-            if q_val.isdigit() and pk_case is not None:
-                q_conds.append(cast(pk_case, Integer) == int(q_val))
             if q_conds:
                 query = query.filter(or_(*q_conds))
 
@@ -695,10 +687,13 @@ def search_cases(
                 query = query.filter(f_list[0])
 
         if year is not None and hasattr(Case, "year"):
-            query = query.filter(cast(Case.year, String) == str(year))
+            col_y = Case.year
+            if isinstance(getattr(col_y, "type", None), String):
+                query = query.filter(col_y == str(year))
+            else:
+                query = query.filter(col_y == year)
 
-        if pk_case is not None:
-            query = query.order_by(cast(pk_case, Integer).desc())
+        query = query.order_by(Case.CaseID.desc())
 
         total_count = query.count()
         results = query.offset((page - 1) * limit).limit(limit).all()
