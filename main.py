@@ -565,101 +565,147 @@ def search_cases(
     from sqlalchemy import String, or_
 
     try:
-        g = globals()
-        sub_names = ["Offender", "Location", "ExecutionStatus"]
-        active_subs = [
-            (name, g[name])
-            for name in sub_names
-            if name in g
-            and g[name] is not None
-            and hasattr(Case, "CaseID")
-            and hasattr(g[name], "CaseID")
-        ]
+        query = db.query(Case)
 
-        query = db.query(Case, *[m for _, m in active_subs])
-
-        for _, sub_model in active_subs:
-            query = query.outerjoin(sub_model, Case.CaseID == sub_model.CaseID)
-
-        sub_map = dict(active_subs)
-        m_off = sub_map.get("Offender")
-        m_loc = sub_map.get("Location")
-        m_exec = sub_map.get("ExecutionStatus")
-
-        def add_str_ilike(conds, model, col_name, text_val):
-            if model is None or not text_val or not hasattr(model, col_name):
-                return
+        def _text_col(model, col_name):
+            if model is None or not hasattr(model, col_name):
+                return None
             col = getattr(model, col_name)
-            if isinstance(getattr(col, "type", None), String):
-                conds.append(col.ilike(f"%{text_val}%"))
+            return col if isinstance(getattr(col, "type", None), String) else None
 
-        if q and q.strip():
-            q_val = q.strip()
+        q_str = (q or "").strip()
+        if q_str:
+            term = f"%{q_str}%"
             q_conds = []
-            add_str_ilike(q_conds, Case, "VariableCode", q_val)
-            add_str_ilike(q_conds, Case, "CaseNumber", q_val)
-            add_str_ilike(q_conds, Case, "DecisionNumber", q_val)
-            add_str_ilike(q_conds, Case, "NationalID", q_val)
-            add_str_ilike(q_conds, m_off, "OffenderName", q_val)
-            add_str_ilike(q_conds, m_off, "NationalID", q_val)
-            add_str_ilike(q_conds, m_loc, "StreetName", q_val)
-            add_str_ilike(q_conds, m_loc, "DistrictName", q_val)
-            add_str_ilike(q_conds, m_exec, "procedure", q_val)
+            for cname in ("VariableCode", "CaseNumber", "DecisionNumber", "NationalID"):
+                c = _text_col(Case, cname)
+                if c is not None:
+                    q_conds.append(c.ilike(term))
+
+            g = globals()
+            if "Offender" in g and g["Offender"] is not None:
+                m_off = g["Offender"]
+                for cname in ("OffenderName", "NationalID"):
+                    c = _text_col(m_off, cname)
+                    if c is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                        q_conds.append(
+                            Case.OffenderID.in_(
+                                db.query(m_off.OffenderID).filter(c.ilike(term))
+                            )
+                        )
+
+            if "Location" in g and g["Location"] is not None:
+                m_loc = g["Location"]
+                for cname in ("StreetName", "DistrictName"):
+                    c = _text_col(m_loc, cname)
+                    if c is not None and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                        q_conds.append(
+                            Case.LocationID.in_(
+                                db.query(m_loc.LocationID).filter(c.ilike(term))
+                            )
+                        )
+
+            if "ExecutionStatus" in g and g["ExecutionStatus"] is not None:
+                m_exec = g["ExecutionStatus"]
+                c_proc = _text_col(m_exec, "procedure")
+                if c_proc is not None and hasattr(m_exec, "CaseID"):
+                    q_conds.append(
+                        Case.CaseID.in_(
+                            db.query(m_exec.CaseID).filter(c_proc.ilike(term))
+                        )
+                    )
+
             if q_conds:
                 query = query.filter(or_(*q_conds))
 
-        if var_code and var_code.strip():
-            f_list = []
-            add_str_ilike(f_list, Case, "VariableCode", var_code.strip())
-            if f_list:
-                query = query.filter(f_list[0])
+        for param_val, col_name in [
+            (var_code, "VariableCode"),
+            (case_no, "CaseNumber"),
+            (decision_no, "DecisionNumber"),
+            (lat, "Latitude"),
+            (lon, "Longitude"),
+        ]:
+            val_s = (param_val or "").strip()
+            if val_s:
+                c = _text_col(Case, col_name)
+                if c is not None:
+                    query = query.filter(c.ilike(f"%{val_s}%"))
 
-        if case_no and case_no.strip():
-            f_list = []
-            add_str_ilike(f_list, Case, "CaseNumber", case_no.strip())
-            if f_list:
-                query = query.filter(f_list[0])
-
-        if decision_no and decision_no.strip():
-            f_list = []
-            add_str_ilike(f_list, Case, "DecisionNumber", decision_no.strip())
-            if f_list:
-                query = query.filter(f_list[0])
-
-        if national_id and national_id.strip():
-            nid_val = national_id.strip()
+        nid_s = (national_id or "").strip()
+        if nid_s:
+            nid_term = f"%{nid_s}%"
             nid_conds = []
-            add_str_ilike(nid_conds, Case, "NationalID", nid_val)
-            add_str_ilike(nid_conds, m_off, "NationalID", nid_val)
+            c_nid = _text_col(Case, "NationalID")
+            if c_nid is not None:
+                nid_conds.append(c_nid.ilike(nid_term))
+            g = globals()
+            if "Offender" in g and g["Offender"] is not None:
+                m_off = g["Offender"]
+                c_onid = _text_col(m_off, "NationalID")
+                if c_onid is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                    nid_conds.append(
+                        Case.OffenderID.in_(
+                            db.query(m_off.OffenderID).filter(c_onid.ilike(nid_term))
+                        )
+                    )
             if nid_conds:
                 query = query.filter(or_(*nid_conds))
 
-        if offender and offender.strip():
-            f_list = []
-            add_str_ilike(f_list, m_off, "OffenderName", offender.strip())
-            if f_list:
-                query = query.filter(f_list[0])
+        off_s = (offender or "").strip()
+        if off_s:
+            g = globals()
+            if "Offender" in g and g["Offender"] is not None:
+                m_off = g["Offender"]
+                c_oname = _text_col(m_off, "OffenderName")
+                if c_oname is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                    query = query.filter(
+                        Case.OffenderID.in_(
+                            db.query(m_off.OffenderID).filter(c_oname.ilike(f"%{off_s}%"))
+                        )
+                    )
 
-        if address and address.strip():
-            addr_val = address.strip()
-            addr_conds = []
-            add_str_ilike(addr_conds, m_loc, "StreetName", addr_val)
-            add_str_ilike(addr_conds, m_loc, "DistrictName", addr_val)
-            if addr_conds:
-                query = query.filter(or_(*addr_conds))
+        addr_s = (address or "").strip()
+        if addr_s:
+            g = globals()
+            if "Location" in g and g["Location"] is not None:
+                m_loc = g["Location"]
+                addr_conds = []
+                for cname in ("StreetName", "DistrictName"):
+                    c = _text_col(m_loc, cname)
+                    if c is not None:
+                        addr_conds.append(c.ilike(f"%{addr_s}%"))
+                if addr_conds and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                    query = query.filter(
+                        Case.LocationID.in_(
+                            db.query(m_loc.LocationID).filter(or_(*addr_conds))
+                        )
+                    )
 
-        if district and district.strip():
-            f_list = []
-            add_str_ilike(f_list, m_loc, "DistrictName", district.strip())
-            if f_list:
-                query = query.filter(f_list[0])
+        dist_s = (district or "").strip()
+        if dist_s:
+            g = globals()
+            if "Location" in g and g["Location"] is not None:
+                m_loc = g["Location"]
+                c_dist = _text_col(m_loc, "DistrictName")
+                if c_dist is not None and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                    query = query.filter(
+                        Case.LocationID.in_(
+                            db.query(m_loc.LocationID).filter(c_dist.ilike(f"%{dist_s}%"))
+                        )
+                    )
 
-        status_val = (status or "").strip()
-        if status_val:
-            f_list = []
-            add_str_ilike(f_list, m_exec, "procedure", status_val)
-            if f_list:
-                query = query.filter(f_list[0])
+        status_s = (status or "").strip()
+        if status_s:
+            g = globals()
+            if "ExecutionStatus" in g and g["ExecutionStatus"] is not None:
+                m_exec = g["ExecutionStatus"]
+                c_proc = _text_col(m_exec, "procedure")
+                if c_proc is not None and hasattr(m_exec, "CaseID"):
+                    query = query.filter(
+                        Case.CaseID.in_(
+                            db.query(m_exec.CaseID).filter(c_proc.ilike(f"%{status_s}%"))
+                        )
+                    )
 
         if year is not None and hasattr(Case, "year"):
             col_y = Case.year
@@ -672,7 +718,32 @@ def search_cases(
             query = query.order_by(Case.CaseID.desc())
 
         total_count = query.count()
-        results = query.offset((page - 1) * limit).limit(limit).all()
+        cases_page = query.offset((page - 1) * limit).limit(limit).all()
+
+        case_ids = [getattr(c, "CaseID", None) for c in cases_page if getattr(c, "CaseID", None) is not None]
+        off_ids = [getattr(c, "OffenderID", None) for c in cases_page if getattr(c, "OffenderID", None) is not None]
+        loc_ids = [getattr(c, "LocationID", None) for c in cases_page if getattr(c, "LocationID", None) is not None]
+
+        g = globals()
+        off_map = {}
+        if off_ids and "Offender" in g and g["Offender"] is not None and hasattr(g["Offender"], "OffenderID"):
+            m_off = g["Offender"]
+            for o in db.query(m_off).filter(m_off.OffenderID.in_(list(set(off_ids)))).all():
+                off_map[getattr(o, "OffenderID")] = o
+
+        loc_map = {}
+        if loc_ids and "Location" in g and g["Location"] is not None and hasattr(g["Location"], "LocationID"):
+            m_loc = g["Location"]
+            for l in db.query(m_loc).filter(m_loc.LocationID.in_(list(set(loc_ids)))).all():
+                loc_map[getattr(l, "LocationID")] = l
+
+        exec_map = {}
+        if case_ids and "ExecutionStatus" in g and g["ExecutionStatus"] is not None and hasattr(g["ExecutionStatus"], "CaseID"):
+            m_exec = g["ExecutionStatus"]
+            for ex in db.query(m_exec).filter(m_exec.CaseID.in_(list(set(case_ids)))).all():
+                cid = getattr(ex, "CaseID")
+                if cid not in exec_map:
+                    exec_map[cid] = ex
 
         def clean_str(val):
             if val is None:
@@ -688,59 +759,50 @@ def search_cases(
             except (ValueError, TypeError):
                 return s
 
-        def attr(obj, name, default=None):
-            return getattr(obj, name, default) if obj is not None else default
-
         data = []
-        for row in results:
-            if isinstance(row, (tuple, list)):
-                r_case = row[0]
-                linked = {name: row[i + 1] for i, (name, _) in enumerate(active_subs)}
-            else:
-                r_case = row
-                linked = {}
+        for r_case in cases_page:
+            cid = getattr(r_case, "CaseID", None)
+            r_off = off_map.get(getattr(r_case, "OffenderID", None))
+            r_loc = loc_map.get(getattr(r_case, "LocationID", None))
+            r_exec = exec_map.get(cid)
 
-            r_off = linked.get("Offender")
-            r_loc = linked.get("Location")
-            r_exec = linked.get("ExecutionStatus")
-
-            off_name = attr(r_off, "OffenderName") or "غير مسجل"
-            raw_nid = attr(r_off, "NationalID") or attr(r_case, "NationalID")
+            off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
+            raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
             off_nid = clean_str(raw_nid)
-            street = attr(r_loc, "StreetName", "") or ""
-            dist = attr(r_loc, "DistrictName", "") or ""
+            street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
+            dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
             full_addr = f"{street} - {dist}".strip(" -") if (street or dist) else ""
-            proc_val = attr(r_exec, "procedure", "") or ""
+            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or ""
 
             data.append({
-                "CaseID": attr(r_case, "CaseID"),
-                "SerialNo": attr(r_case, "SerialNo", "") or "",
-                "VariableCode": attr(r_case, "VariableCode", "-") or "-",
-                "VariableDate": attr(r_case, "VariableDate", "") or "",
-                "CaseNumber": attr(r_case, "CaseNumber", "-") or "-",
-                "CaseDate": attr(r_case, "CaseDate", "") or "",
-                "DecisionNumber": attr(r_case, "DecisionNumber", "-") or "-",
-                "DecisionDate": attr(r_case, "DecisionDate", "") or "",
-                "year": attr(r_case, "year", "") or "",
-                "StopNumber": attr(r_case, "StopNumber", "") or "",
-                "AdminNumber": attr(r_case, "AdminNumber", "") or "",
-                "AreaSize": attr(r_case, "AreaSize", 0.0) or 0.0,
-                "Notes": attr(r_case, "Notes", "") or "",
-                "Latitude": attr(r_case, "Latitude", "") or "",
-                "Longitude": attr(r_case, "Longitude", "") or "",
+                "CaseID": cid,
+                "SerialNo": getattr(r_case, "SerialNo", "") or "",
+                "VariableCode": getattr(r_case, "VariableCode", "-") or "-",
+                "VariableDate": getattr(r_case, "VariableDate", "") or "",
+                "CaseNumber": getattr(r_case, "CaseNumber", "-") or "-",
+                "CaseDate": getattr(r_case, "CaseDate", "") or "",
+                "DecisionNumber": getattr(r_case, "DecisionNumber", "-") or "-",
+                "DecisionDate": getattr(r_case, "DecisionDate", "") or "",
+                "year": getattr(r_case, "year", "") or "",
+                "StopNumber": getattr(r_case, "StopNumber", "") or "",
+                "AdminNumber": getattr(r_case, "AdminNumber", "") or "",
+                "AreaSize": getattr(r_case, "AreaSize", 0.0) or 0.0,
+                "Notes": getattr(r_case, "Notes", "") or "",
+                "Latitude": getattr(r_case, "Latitude", "") or "",
+                "Longitude": getattr(r_case, "Longitude", "") or "",
                 "OffenderName": off_name,
                 "OffenderNationalID": off_nid,
-                "OffenderAddress": attr(r_off, "OffenderAddress", "") or "",
-                "Phone": clean_str(attr(r_off, "Phone")),
-                "OffenderNotes": attr(r_off, "Notes", "") or "",
+                "OffenderAddress": getattr(r_off, "OffenderAddress", "") or "",
+                "Phone": clean_str(getattr(r_off, "Phone", "")),
+                "OffenderNotes": getattr(r_off, "Notes", "") or "",
                 "StreetName": street,
                 "DistrictName": dist,
                 "FullAddress": full_addr,
-                "Landmark": attr(r_loc, "Landmark", "") or "",
+                "Landmark": getattr(r_loc, "Landmark", "") or "",
                 "ExecutionStatusName": proc_val or "تنفيذ جزئي",
                 "procedure": proc_val,
-                "ExecutionLevel": attr(r_exec, "ExecutionLevel", "") or "",
-                "ExecNotes": attr(r_exec, "Notes", "") or "",
+                "ExecutionLevel": getattr(r_exec, "ExecutionLevel", "") or "",
+                "ExecNotes": getattr(r_exec, "Notes", "") or "",
                 "HasAppeal": False,
                 "CourtDecision": "",
                 "CourtDecisionDate": None,
@@ -757,7 +819,7 @@ def search_cases(
                 "ReconciliationDate": "",
                 "FineAmount": None,
                 "ReconNotes": "",
-                "ViolationTypeName": attr(r_case, "ViolationTypeName", "") or "",
+                "ViolationTypeName": getattr(r_case, "ViolationTypeName", "") or "",
                 "ViolationDescription": ""
             })
 
