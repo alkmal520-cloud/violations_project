@@ -4,6 +4,7 @@ import csv
 import io
 import glob
 import json
+import pythoncom
 import subprocess
 import pandas as pd
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ from sqlalchemy import create_engine, Column, BigInteger, Text, Boolean, Float, 
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from passlib.context import CryptContext
 import jwt
+import win32com.client
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -245,6 +247,46 @@ def log_audit(db: Session, username: str, action: str, table: str, details: str)
 def get_current_user_payload(credentials: HTTPAuthorizationCredentials = Depends(security)):
     return decode_access_token(credentials.credentials)
 
+def _norm_key(val):
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ("none", "null", "nan"):
+        return None
+    try:
+        f = float(s)
+        if math.isnan(f):
+            return None
+        return str(int(f)) if f.is_integer() else s
+    except (ValueError, TypeError):
+        return s
+
+def _fmt_num_or_str(val):
+    if val is None:
+        return ""
+    if isinstance(val, float):
+        if math.isnan(val):
+            return ""
+        return str(int(val)) if val.is_integer() else str(val)
+    s = str(val).strip()
+    if not s or s.lower() in ("none", "null", "nan"):
+        return ""
+    try:
+        f = float(s)
+        if math.isnan(f):
+            return ""
+        return str(int(f)) if f.is_integer() else s
+    except (ValueError, TypeError):
+        return s
+
+def _safe_text(val, default=""):
+    if val is None:
+        return default
+    s = str(val).strip()
+    if not s or s.lower() in ("none", "null", "nan"):
+        return default
+    return s
+
 def build_filtered_cases_query(
     db: Session,
     q: Optional[str] = "",
@@ -262,77 +304,230 @@ def build_filtered_cases_query(
     vtype: Optional[str] = "",
     year: Optional[int] = None,
 ):
-    query = db.query(Case, Offender, Location, ExecutionStatus, Judgement, Reconciliation, ViolationType)\
-              .outerjoin(Offender, Case.CaseID == Offender.CaseID)\
-              .outerjoin(Location, Case.CaseID == Location.CaseID)\
-              .outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)\
-              .outerjoin(Judgement, Case.CaseID == Judgement.CaseID)\
-              .outerjoin(Reconciliation, Case.CaseID == Reconciliation.CaseID)\
-              .outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
+    query = db.query(Case)
 
     if var_code and var_code.strip():
         query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
+
     if case_no and case_no.strip():
         query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
+
     if decision_no and decision_no.strip():
         query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
-    if national_id and national_id.strip():
-        try:
-            n_val = float(national_id.strip())
-            query = query.filter(Offender.NationalID == n_val)
-        except:
-            query = query.filter(Offender.NationalID == -999999)
 
     if lat and lat.strip():
         query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
+
     if lon and lon.strip():
         query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
 
+    if year is not None and year != "":
+        try:
+            y_int = int(year)
+            query = query.filter(Case.year == y_int)
+        except (ValueError, TypeError):
+            pass
+
+    if national_id and national_id.strip():
+        nid_clean = national_id.strip()
+        nid_like = f"%{nid_clean}%"
+        try:
+            nid_num = float(nid_clean)
+            if math.isnan(nid_num):
+                nid_num = None
+        except (ValueError, TypeError):
+            nid_num = None
+
+        off_q = db.query(Offender.CaseID).filter(
+            Offender.CaseID.isnot(None),
+            Offender.NationalID == nid_num
+        ) if nid_num is not None else db.query(Offender.CaseID).filter(
+            Offender.CaseID.isnot(None),
+            func.cast(Offender.NationalID, Text).ilike(nid_like)
+        )
+        query = query.filter(Case.CaseID.in_(off_q))
+
     if offender and offender.strip():
-        query = query.filter(Offender.OffenderName.ilike(f"%{offender.strip()}%"))
+        off_like = f"%{offender.strip()}%"
+        off_name_q = db.query(Offender.CaseID).filter(
+            Offender.CaseID.isnot(None),
+            Offender.OffenderName.ilike(off_like)
+        )
+        query = query.filter(Case.CaseID.in_(off_name_q))
+
     if address and address.strip():
-        addr_filter = f"%{address.strip()}%"
-        query = query.filter(or_(
-            Location.FullAddress.ilike(addr_filter),
-            Location.StreetName.ilike(addr_filter),
-            Offender.OffenderAddress.ilike(addr_filter)
-        ))
+        addr_like = f"%{address.strip()}%"
+        loc_addr_q = db.query(Location.CaseID).filter(
+            Location.CaseID.isnot(None),
+            or_(
+                Location.FullAddress.ilike(addr_like),
+                Location.StreetName.ilike(addr_like),
+                Location.DistrictName.ilike(addr_like),
+                Location.Landmark.ilike(addr_like),
+            )
+        )
+        off_addr_q = db.query(Offender.CaseID).filter(
+            Offender.CaseID.isnot(None),
+            Offender.OffenderAddress.ilike(addr_like)
+        )
+        query = query.filter(or_(Case.CaseID.in_(loc_addr_q), Case.CaseID.in_(off_addr_q)))
+
+    if district and district.strip():
+        dist_like = f"%{district.strip()}%"
+        dist_q = db.query(Location.CaseID).filter(
+            Location.CaseID.isnot(None),
+            Location.DistrictName.ilike(dist_like)
+        )
+        query = query.filter(Case.CaseID.in_(dist_q))
 
     effective_vtype = (v_type or vtype or "").strip()
     if effective_vtype:
-        query = query.filter(ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%"))
+        vt_q = db.query(ViolationType.CaseID).filter(
+            ViolationType.CaseID.isnot(None),
+            ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%")
+        )
+        query = query.filter(Case.CaseID.in_(vt_q))
+
+    if status and status.strip():
+        st_val = status.strip()
+        st_q = db.query(ExecutionStatus.CaseID).filter(
+            ExecutionStatus.CaseID.isnot(None),
+            or_(
+                ExecutionStatus.ExecutionStatusName == st_val,
+                ExecutionStatus.ExecutionStatusName.ilike(f"%{st_val}%"),
+                ExecutionStatus.procedure.ilike(f"%{st_val}%"),
+            )
+        )
+        query = query.filter(Case.CaseID.in_(st_q))
 
     if q and q.strip():
         clean_q = q.strip()
-        search_filter = f"%{clean_q}%"
+        search_like = f"%{clean_q}%"
         try:
-            numeric_val = float(clean_q)
-        except:
-            numeric_val = None
+            q_num = float(clean_q)
+            if math.isnan(q_num):
+                q_num = None
+        except (ValueError, TypeError):
+            q_num = None
 
-        filters = [
-            Case.VariableCode.ilike(search_filter),
-            Case.CaseNumber.ilike(search_filter),
-            Case.DecisionNumber.ilike(search_filter),
-            Case.Latitude.ilike(search_filter),
-            Case.Longitude.ilike(search_filter),
-            Offender.OffenderName.ilike(search_filter),
-            Location.FullAddress.ilike(search_filter),
-            Location.DistrictName.ilike(search_filter),
-            ViolationType.ViolationTypeName.ilike(search_filter)
+        case_conds = [
+            Case.VariableCode.ilike(search_like),
+            Case.CaseNumber.ilike(search_like),
+            Case.DecisionNumber.ilike(search_like),
+            Case.Latitude.ilike(search_like),
+            Case.Longitude.ilike(search_like),
+            Case.Notes.ilike(search_like),
         ]
-        if numeric_val is not None:
-            filters.append(Offender.NationalID == numeric_val)
-        query = query.filter(or_(*filters))
+        if q_num is not None and q_num.is_integer():
+            case_conds.append(Case.CaseID == int(q_num))
+            case_conds.append(Case.SerialNo == int(q_num))
 
-    if status and status.strip():
-        query = query.filter(ExecutionStatus.ExecutionStatusName == status.strip())
-    if district and district.strip():
-        query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
-    if year:
-        query = query.filter(Case.year == year)
+        off_conds = [
+            Offender.OffenderName.ilike(search_like),
+            Offender.OffenderAddress.ilike(search_like),
+            func.cast(Offender.NationalID, Text).ilike(search_like),
+        ]
+        if q_num is not None:
+            off_conds.append(Offender.NationalID == q_num)
 
-    return query.order_by(Case.SerialNo.desc())
+        loc_conds = [
+            Location.FullAddress.ilike(search_like),
+            Location.StreetName.ilike(search_like),
+            Location.DistrictName.ilike(search_like),
+            Location.Landmark.ilike(search_like),
+        ]
+
+        vt_conds = [
+            ViolationType.ViolationTypeName.ilike(search_like),
+            ViolationType.ViolationDescription.ilike(search_like),
+        ]
+
+        q_sub_off = db.query(Offender.CaseID).filter(Offender.CaseID.isnot(None), or_(*off_conds))
+        q_sub_loc = db.query(Location.CaseID).filter(Location.CaseID.isnot(None), or_(*loc_conds))
+        q_sub_vt = db.query(ViolationType.CaseID).filter(ViolationType.CaseID.isnot(None), or_(*vt_conds))
+
+        query = query.filter(
+            or_(
+                *case_conds,
+                Case.CaseID.in_(q_sub_off),
+                Case.CaseID.in_(q_sub_loc),
+                Case.CaseID.in_(q_sub_vt),
+            )
+        )
+
+    return query.order_by(Case.CaseID.desc())
+
+def hydrate_cases_rows(db: Session, cases_list):
+    if not cases_list:
+        return []
+
+    case_keys = []
+    for c in cases_list:
+        k = _norm_key(c.CaseID)
+        if k is not None:
+            case_keys.append(k)
+    unique_keys = list(dict.fromkeys(case_keys))
+
+    raw_ids = []
+    for c in cases_list:
+        if c.CaseID is not None:
+            raw_ids.append(c.CaseID)
+            try:
+                raw_ids.append(int(c.CaseID))
+            except Exception:
+                pass
+            raw_ids.append(str(c.CaseID))
+
+    off_map = {}
+    loc_map = {}
+    exec_map = {}
+    judg_map = {}
+    recon_map = {}
+    vtype_map = {}
+
+    if unique_keys:
+        for row in db.query(Offender).filter(Offender.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in off_map:
+                off_map[k] = row
+
+        for row in db.query(Location).filter(Location.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in loc_map:
+                loc_map[k] = row
+
+        for row in db.query(ExecutionStatus).filter(ExecutionStatus.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in exec_map:
+                exec_map[k] = row
+
+        for row in db.query(Judgement).filter(Judgement.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in judg_map:
+                judg_map[k] = row
+
+        for row in db.query(Reconciliation).filter(Reconciliation.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in recon_map:
+                recon_map[k] = row
+
+        for row in db.query(ViolationType).filter(ViolationType.CaseID.in_(raw_ids)).all():
+            k = _norm_key(row.CaseID)
+            if k and k not in vtype_map:
+                vtype_map[k] = row
+
+    hydrated = []
+    for r_case in cases_list:
+        ck = _norm_key(r_case.CaseID)
+        r_off = off_map.get(ck) if ck else None
+        r_loc = loc_map.get(ck) if ck else None
+        r_exec = exec_map.get(ck) if ck else None
+        r_judg = judg_map.get(ck) if ck else None
+        r_recon = recon_map.get(ck) if ck else None
+        r_vtype = vtype_map.get(ck) if ck else None
+        hydrated.append((r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype))
+
+    return hydrated
 
 class LoginPayload(BaseModel):
     username: str
@@ -397,12 +592,19 @@ class CaseFullPayload(BaseModel):
 def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.Username == payload.username).first()
     if not user or not user.IsActive:
-        raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو معطل")
+        log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول لحساب غير موجود أو معطل")
+        raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو الحساب معطل أمنياً")
+
+    if not verify_password(payload.password, user.PasswordHash):
+        log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول فاشلة")
+        raise HTTPException(status_code=401, detail="اسم المستخدم أو كلمة المرور غير صحيحة")
+
     token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.Username, "role": user.Role, "fullname": user.FullName or ""},
         expires_delta=token_expires
     )
+    log_audit(db, user.Username, "LOGIN_SUCCESS", "tbl_users", "تم تسجيل الدخول بنجاح")
     return {
         "status": "success",
         "access_token": access_token,
@@ -462,8 +664,8 @@ def get_user_activity_stats(user_data: dict = Depends(get_current_user_payload),
         if action in users_summary[uname]: users_summary[uname][action] = cnt
     logs = db.query(AuditLog).order_by(AuditLog.LogID.desc()).limit(100).all()
     return {
-        "status": "success", 
-        "summary": users_summary, 
+        "status": "success",
+        "summary": users_summary,
         "records_summary": records_summary,
         "logs": [{"LogID": l.LogID, "Username": l.Username, "ActionType": l.ActionType, "TargetTable": l.TargetTable, "Details": l.Details, "Timestamp": l.Timestamp} for l in logs]
     }
@@ -481,9 +683,9 @@ def get_stats(user_data: dict = Depends(get_current_user_payload), db: Session =
     districts = [d[0] for d in db.query(Location.DistrictName).distinct().all() if d[0]]
     violation_types = [v[0] for v in db.query(ViolationType.ViolationTypeName).distinct().all() if v[0]]
     return {
-        "status": "success", 
-        "total_cases": total_cases, 
-        "variable_coded_count": variable_coded_count, 
+        "status": "success",
+        "total_cases": total_cases,
+        "variable_coded_count": variable_coded_count,
         "status_breakdown": {str(st[0]): st[1] for st in status_counts if st[0]},
         "districts": districts,
         "violation_types": violation_types
@@ -562,224 +764,67 @@ def search_cases(
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
-    from sqlalchemy import String, or_
-
-    def _norm_id(val):
-        if val is None:
-            return None
-        s = str(val).strip()
-        if not s or s.lower() in ("none", "null", "nan"):
-            return None
-        try:
-            f = float(s)
-            if math.isnan(f):
-                return None
-            return str(int(f)) if f.is_integer() else s
-        except (ValueError, TypeError):
-            return s
-
-    def _text_col(model, col_name):
-        if model is None or not hasattr(model, col_name):
-            return None
-        col = getattr(model, col_name)
-        return col if isinstance(getattr(col, "type", None), String) else None
-
-    def clean_str(val):
-        if val is None:
-            return ""
-        s = str(val).strip()
-        if not s or s.lower() in ("none", "null", "nan"):
-            return ""
-        try:
-            f = float(s)
-            if math.isnan(f):
-                return ""
-            return str(int(f)) if f.is_integer() else s
-        except (ValueError, TypeError):
-            return s
-
     try:
-        query = db.query(Case)
-
-        q_str = (q or "").strip()
-        if q_str:
-            term = f"%{q_str}%"
-            q_conds = [
-                c.ilike(term)
-                for cname in ("VariableCode", "CaseNumber", "DecisionNumber", "NationalID")
-                if (c := _text_col(Case, cname)) is not None
-            ]
-            if q_conds:
-                query = query.filter(or_(*q_conds))
-
-        for param_val, col_name in [
-            (var_code, "VariableCode"),
-            (case_no, "CaseNumber"),
-            (decision_no, "DecisionNumber"),
-            (national_id, "NationalID"),
-            (lat, "Latitude"),
-            (lon, "Longitude"),
-        ]:
-            val_s = (param_val or "").strip()
-            if val_s:
-                c = _text_col(Case, col_name)
-                if c is not None:
-                    query = query.filter(c.ilike(f"%{val_s}%"))
-
-        if year is not None and hasattr(Case, "year"):
-            col_y = Case.year
-            if isinstance(getattr(col_y, "type", None), String):
-                query = query.filter(col_y == str(year))
-            else:
-                query = query.filter(col_y == year)
-
-        if hasattr(Case, "CaseID"):
-            query = query.order_by(Case.CaseID.desc())
+        query = build_filtered_cases_query(
+            db=db, q=q, var_code=var_code, case_no=case_no, decision_no=decision_no,
+            national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
+            v_type=v_type, status=status, district=district, vtype=vtype, year=year
+        )
 
         total_count = query.count()
         cases_page = query.offset((page - 1) * limit).limit(limit).all()
-
-        case_ids_set = {
-            nid for c in cases_page if (nid := _norm_id(getattr(c, "CaseID", None))) is not None
-        }
-        off_ids_set = {
-            oid for c in cases_page if (oid := _norm_id(getattr(c, "OffenderID", None))) is not None
-        }
-        loc_ids_set = {
-            lid for c in cases_page if (lid := _norm_id(getattr(c, "LocationID", None))) is not None
-        }
-
-        g = globals()
-
-        def _load_by_case_or_id(model_name, id_attr_name, target_ids, case_target_ids):
-            by_case = {}
-            by_id = {}
-            m = g.get(model_name)
-            if m is None or (not target_ids and not case_target_ids):
-                return by_case, by_id
-            for obj in db.query(m).all():
-                if hasattr(m, "CaseID") and case_target_ids:
-                    ck = _norm_id(getattr(obj, "CaseID", None))
-                    if ck and ck in case_target_ids and ck not in by_case:
-                        by_case[ck] = obj
-                if id_attr_name and hasattr(m, id_attr_name) and target_ids:
-                    ik = _norm_id(getattr(obj, id_attr_name, None))
-                    if ik and ik in target_ids and ik not in by_id:
-                        by_id[ik] = obj
-            return by_case, by_id
-
-        off_by_case, off_by_id = _load_by_case_or_id("Offender", "OffenderID", off_ids_set, case_ids_set)
-        loc_by_case, loc_by_id = _load_by_case_or_id("Location", "LocationID", loc_ids_set, case_ids_set)
-        exec_by_case, _ = _load_by_case_or_id("ExecutionStatus", None, set(), case_ids_set)
-        vtype_by_case, _ = _load_by_case_or_id("ViolationType", None, set(), case_ids_set)
-        judg_by_case, _ = _load_by_case_or_id("Judgement", None, set(), case_ids_set)
-        recon_by_case, _ = _load_by_case_or_id("Reconciliation", None, set(), case_ids_set)
-
-        off_s = (offender or "").strip().lower()
-        addr_s = (address or "").strip().lower()
-        dist_s = (district or "").strip().lower()
-        status_s = (status or "").strip().lower()
-        vtype_s = (vtype or v_type or "").strip().lower()
+        results = hydrate_cases_rows(db, cases_page)
 
         data = []
-        for r_case in cases_page:
-            cid_norm = _norm_id(getattr(r_case, "CaseID", None))
-            oid_norm = _norm_id(getattr(r_case, "OffenderID", None))
-            lid_norm = _norm_id(getattr(r_case, "LocationID", None))
-
-            r_off = (off_by_case.get(cid_norm) if cid_norm else None) or (
-                off_by_id.get(oid_norm) if oid_norm else None
-            )
-            r_loc = (loc_by_case.get(cid_norm) if cid_norm else None) or (
-                loc_by_id.get(lid_norm) if lid_norm else None
-            )
-            r_exec = exec_by_case.get(cid_norm) if cid_norm else None
-            r_vt = vtype_by_case.get(cid_norm) if cid_norm else None
-            r_jd = judg_by_case.get(cid_norm) if cid_norm else None
-            r_rc = recon_by_case.get(cid_norm) if cid_norm else None
-
-            off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
-            raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
-            off_nid = clean_str(raw_nid)
-
-            street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
-            dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
-            full_addr = (
-                (getattr(r_loc, "FullAddress", None) if r_loc else None)
-                or (f"{street} - {dist}".strip(" -") if (street or dist) else "")
-            )
-
-            exec_status_name = (
-                (getattr(r_exec, "ExecutionStatusName", None) if r_exec else None)
-                or (getattr(r_exec, "procedure", None) if r_exec else None)
-                or "تنفيذ جزئي"
-            )
-            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or exec_status_name
-
-            vtype_name = (
-                (getattr(r_vt, "ViolationTypeName", None) if r_vt else None)
-                or getattr(r_case, "ViolationTypeName", None)
-                or ""
-            )
-
-            if off_s and off_s not in off_name.lower():
-                continue
-            if addr_s and addr_s not in f"{street} {dist} {full_addr}".lower():
-                continue
-            if dist_s and dist_s not in dist.lower():
-                continue
-            if status_s and status_s not in f"{exec_status_name} {proc_val}".lower():
-                continue
-            if vtype_s and vtype_s not in vtype_name.lower():
-                continue
-
+        for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
+            exec_name = _safe_text(r_exec.ExecutionStatusName if r_exec else "", "") or _safe_text(r_exec.procedure if r_exec else "", "تنفيذ جزئي")
             data.append({
-                "CaseID": getattr(r_case, "CaseID", None),
-                "SerialNo": getattr(r_case, "SerialNo", "") or "",
-                "VariableCode": getattr(r_case, "VariableCode", "-") or "-",
-                "VariableDate": getattr(r_case, "VariableDate", "") or "",
-                "CaseNumber": getattr(r_case, "CaseNumber", "-") or "-",
-                "CaseDate": getattr(r_case, "CaseDate", "") or "",
-                "DecisionNumber": getattr(r_case, "DecisionNumber", "-") or "-",
-                "DecisionDate": getattr(r_case, "DecisionDate", "") or "",
-                "year": getattr(r_case, "year", "") or "",
-                "StopNumber": getattr(r_case, "StopNumber", "") or "",
-                "AdminNumber": getattr(r_case, "AdminNumber", "") or "",
-                "AreaSize": getattr(r_case, "AreaSize", 0.0) or 0.0,
-                "Notes": getattr(r_case, "Notes", "") or "",
-                "Latitude": getattr(r_case, "Latitude", "") or "",
-                "Longitude": getattr(r_case, "Longitude", "") or "",
-                "OffenderName": off_name,
-                "OffenderNationalID": off_nid,
-                "OffenderAddress": getattr(r_off, "OffenderAddress", "") or "",
-                "Phone": clean_str(getattr(r_off, "Phone", "")),
-                "OffenderNotes": getattr(r_off, "Notes", "") or "",
-                "StreetName": street,
-                "DistrictName": dist,
-                "FullAddress": full_addr,
-                "Landmark": getattr(r_loc, "Landmark", "") or "",
-                "ExecutionStatusName": exec_status_name,
-                "procedure": proc_val,
-                "ExecutionLevel": getattr(r_exec, "ExecutionLevel", "") or "",
-                "ExecNotes": getattr(r_exec, "Notes", "") or "",
-                "HasAppeal": bool(getattr(r_jd, "HasAppeal", False)) if r_jd else False,
-                "CourtDecision": getattr(r_jd, "CourtDecision", "") or "" if r_jd else "",
-                "CourtDecisionDate": getattr(r_jd, "CourtDecisionDate", None) if r_jd else None,
-                "DeputyGovernorDecision": getattr(r_jd, "DeputyGovernorDecision", None) if r_jd else None,
-                "DateDeputyGovernorDecision": getattr(r_jd, "DateDeputyGovernorDecision", None) if r_jd else None,
-                "FinalJudgement": getattr(r_jd, "FinalJudgement", None) if r_jd else None,
-                "FinalJudgementDate": getattr(r_jd, "FinalJudgementDate", None) if r_jd else None,
-                "TheFine": getattr(r_jd, "TheFine", None) if r_jd else None,
-                "NonExecutionNumber": getattr(r_jd, "NonExecutionNumber", None) if r_jd else None,
-                "DepartmentIssueDate": getattr(r_jd, "DepartmentIssueDate", None) if r_jd else None,
-                "FelonyNumber": getattr(r_jd, "FelonyNumber", None) if r_jd else None,
-                "JudgementNotes": getattr(r_jd, "Notes", "") or "" if r_jd else "",
-                "ReconciliationNumber": getattr(r_rc, "ReconciliationNumber", "") or "" if r_rc else "",
-                "ReconciliationDate": getattr(r_rc, "ReconciliationDate", "") or "" if r_rc else "",
-                "FineAmount": getattr(r_rc, "FineAmount", None) if r_rc else None,
-                "ReconNotes": getattr(r_rc, "Notes", "") or "" if r_rc else "",
-                "ViolationTypeName": vtype_name,
-                "ViolationDescription": getattr(r_vt, "ViolationDescription", "") or "" if r_vt else ""
+                "CaseID": r_case.CaseID,
+                "SerialNo": _fmt_num_or_str(r_case.SerialNo),
+                "VariableCode": _safe_text(r_case.VariableCode, "-"),
+                "VariableDate": _safe_text(r_case.VariableDate, ""),
+                "CaseNumber": _safe_text(r_case.CaseNumber, "-"),
+                "CaseDate": _safe_text(r_case.CaseDate, ""),
+                "DecisionNumber": _safe_text(r_case.DecisionNumber, "-"),
+                "DecisionDate": _safe_text(r_case.DecisionDate, ""),
+                "year": _fmt_num_or_str(r_case.year),
+                "StopNumber": _safe_text(r_case.StopNumber, ""),
+                "AdminNumber": _safe_text(r_case.AdminNumber, ""),
+                "AreaSize": r_case.AreaSize if r_case.AreaSize is not None and not (isinstance(r_case.AreaSize, float) and math.isnan(r_case.AreaSize)) else 0.0,
+                "Notes": _safe_text(r_case.Notes, ""),
+                "Latitude": _safe_text(r_case.Latitude, ""),
+                "Longitude": _safe_text(r_case.Longitude, ""),
+                "OffenderName": _safe_text(r_off.OffenderName if r_off else "", "غير مسجل"),
+                "OffenderNationalID": _fmt_num_or_str(r_off.NationalID if r_off else None),
+                "OffenderAddress": _safe_text(r_off.OffenderAddress if r_off else "", ""),
+                "Phone": _fmt_num_or_str(r_off.Phone if r_off else None),
+                "OffenderNotes": _safe_text(r_off.Notes if r_off else "", ""),
+                "StreetName": _safe_text(r_loc.StreetName if r_loc else "", ""),
+                "DistrictName": _safe_text(r_loc.DistrictName if r_loc else "", ""),
+                "FullAddress": _safe_text(r_loc.FullAddress if r_loc else "", ""),
+                "Landmark": _safe_text(r_loc.Landmark if r_loc else "", ""),
+                "ExecutionStatusName": exec_name,
+                "procedure": _safe_text(r_exec.procedure if r_exec else "", ""),
+                "ExecutionLevel": _safe_text(r_exec.ExecutionLevel if r_exec else "", ""),
+                "ExecNotes": _safe_text(r_exec.Notes if r_exec else "", ""),
+                "HasAppeal": bool(r_judg.HasAppeal) if r_judg and r_judg.HasAppeal is not None else False,
+                "CourtDecision": _safe_text(r_judg.CourtDecision if r_judg else "", ""),
+                "CourtDecisionDate": r_judg.CourtDecisionDate if r_judg else None,
+                "DeputyGovernorDecision": r_judg.DeputyGovernorDecision if r_judg else None,
+                "DateDeputyGovernorDecision": r_judg.DateDeputyGovernorDecision if r_judg else None,
+                "FinalJudgement": r_judg.FinalJudgement if r_judg else None,
+                "FinalJudgementDate": r_judg.FinalJudgementDate if r_judg else None,
+                "TheFine": r_judg.TheFine if r_judg else None,
+                "NonExecutionNumber": r_judg.NonExecutionNumber if r_judg else None,
+                "DepartmentIssueDate": r_judg.DepartmentIssueDate if r_judg else None,
+                "FelonyNumber": r_judg.FelonyNumber if r_judg else None,
+                "JudgementNotes": _safe_text(r_judg.Notes if r_judg else "", ""),
+                "ReconciliationNumber": _safe_text(r_recon.ReconciliationNumber if r_recon else "", ""),
+                "ReconciliationDate": _safe_text(r_recon.ReconciliationDate if r_recon else "", ""),
+                "FineAmount": r_recon.FineAmount if r_recon else None,
+                "ReconNotes": _safe_text(r_recon.Notes if r_recon else "", ""),
+                "ViolationTypeName": _safe_text(r_vtype.ViolationTypeName if r_vtype else "", ""),
+                "ViolationDescription": _safe_text(r_vtype.ViolationDescription if r_vtype else "", "")
             })
 
         return {
@@ -792,7 +837,7 @@ def search_cases(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في استعلام البحث: {str(e)}")
-        
+
 # --- مسارات الإضافة والتعديل والأرشيف والتصدير المحسّنة ---
 @app.post("/api/cases")
 def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
@@ -1033,30 +1078,30 @@ def export_excel(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = query.yield_per(500).all()
-    
+    results = hydrate_cases_rows(db, query.yield_per(500).all())
+
     headers = [
-        "م", "معرف السجل", "مسلسل", "كود المتغير", "تاريخ المتغير", 
-        "رقم المحضر", "تاريخ المحضر", "السنة", "رقم الإيقاف", "الرقم الإداري", 
-        "رقم القرار", "تاريخ القرار", "المساحة", "ملاحظات المحضر", "خط العرض", 
-        "خط الطول", "اسم المخالف", "الرقم القومي", "عنوان المخالف", "رقم الهاتف", 
-        "الشارع", "المنطقة / الحي", "العنوان التفصيلي", "حالة التنفيذ", "الإجراء المتخذ", 
+        "م", "معرف السجل", "مسلسل", "كود المتغير", "تاريخ المتغير",
+        "رقم المحضر", "تاريخ المحضر", "السنة", "رقم الإيقاف", "الرقم الإداري",
+        "رقم القرار", "تاريخ القرار", "المساحة", "ملاحظات المحضر", "خط العرض",
+        "خط الطول", "اسم المخالف", "الرقم القومي", "عنوان المخالف", "رقم الهاتف",
+        "الشارع", "المنطقة / الحي", "العنوان التفصيلي", "حالة التنفيذ", "الإجراء المتخذ",
         "نوع المخالفة", "وصف المخالفة"
     ]
-    
+
     wb = openpyxl.Workbook(write_only=True)
     ws = wb.create_sheet(title="تقرير المحاضر والمخالفات")
     ws.views.sheetView[0].rightToLeft = True
-    
+
     header_fill = PatternFill(start_color="E2E8F0", end_color="E2E8F0", fill_type="solid")
     header_font = Font(name="Arial", size=11, bold=True, color="000000")
     thin_border = Border(
-        left=Side(style='thin', color='A0AEC0'), 
-        right=Side(style='thin', color='A0AEC0'), 
-        top=Side(style='thin', color='A0AEC0'), 
+        left=Side(style='thin', color='A0AEC0'),
+        right=Side(style='thin', color='A0AEC0'),
+        top=Side(style='thin', color='A0AEC0'),
         bottom=Side(style='thin', color='A0AEC0')
     )
-    
+
     header_cells = []
     for h_text in headers:
         c = openpyxl.cell.WriteOnlyCell(ws, value=h_text)
@@ -1066,44 +1111,44 @@ def export_excel(
         c.border = thin_border
         header_cells.append(c)
     ws.append(header_cells)
-    
+
     row_font = Font(name="Arial", size=10, color="000000")
     col_widths = {idx + 1: max(len(h) + 4, 13) for idx, h in enumerate(headers)}
 
     for idx, (r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype) in enumerate(results, 1):
-        nat_id_str = str(int(r_off.NationalID)) if r_off and r_off.NationalID and not math.isnan(r_off.NationalID) else ""
-        phone_str = str(int(r_off.Phone)) if r_off and r_off.Phone and not math.isnan(r_off.Phone) else ""
+        nat_id_str = _fmt_num_or_str(r_off.NationalID if r_off else None)
+        phone_str = _fmt_num_or_str(r_off.Phone if r_off else None)
 
         row_values = [
             idx,
             r_case.CaseID if r_case else "",
-            r_case.SerialNo if r_case else "",
-            r_case.VariableCode if r_case else "",
-            r_case.VariableDate if r_case else "",
-            r_case.CaseNumber if r_case else "",
-            r_case.CaseDate if r_case else "",
-            r_case.year if r_case else "",
-            r_case.StopNumber if r_case else "",
-            r_case.AdminNumber if r_case else "",
-            r_case.DecisionNumber if r_case else "",
-            r_case.DecisionDate if r_case else "",
-            r_case.AreaSize if r_case else "",
-            r_case.Notes if r_case else "",
-            r_case.Latitude if r_case else "",
-            r_case.Longitude if r_case else "",
-            r_off.OffenderName if r_off else "",
+            _fmt_num_or_str(r_case.SerialNo if r_case else None),
+            _safe_text(r_case.VariableCode if r_case else "", ""),
+            _safe_text(r_case.VariableDate if r_case else "", ""),
+            _safe_text(r_case.CaseNumber if r_case else "", ""),
+            _safe_text(r_case.CaseDate if r_case else "", ""),
+            _fmt_num_or_str(r_case.year if r_case else None),
+            _safe_text(r_case.StopNumber if r_case else "", ""),
+            _safe_text(r_case.AdminNumber if r_case else "", ""),
+            _safe_text(r_case.DecisionNumber if r_case else "", ""),
+            _safe_text(r_case.DecisionDate if r_case else "", ""),
+            r_case.AreaSize if r_case and r_case.AreaSize is not None and not (isinstance(r_case.AreaSize, float) and math.isnan(r_case.AreaSize)) else "",
+            _safe_text(r_case.Notes if r_case else "", ""),
+            _safe_text(r_case.Latitude if r_case else "", ""),
+            _safe_text(r_case.Longitude if r_case else "", ""),
+            _safe_text(r_off.OffenderName if r_off else "", ""),
             nat_id_str,
-            r_off.OffenderAddress if r_off else "",
+            _safe_text(r_off.OffenderAddress if r_off else "", ""),
             phone_str,
-            r_loc.StreetName if r_loc else "",
-            r_loc.DistrictName if r_loc else "",
-            r_loc.FullAddress if r_loc else "",
-            r_exec.ExecutionStatusName if r_exec else "",
-            r_exec.procedure if r_exec else "",
-            r_vtype.ViolationTypeName if r_vtype else "",
-            r_vtype.ViolationDescription if r_vtype else ""
+            _safe_text(r_loc.StreetName if r_loc else "", ""),
+            _safe_text(r_loc.DistrictName if r_loc else "", ""),
+            _safe_text(r_loc.FullAddress if r_loc else "", ""),
+            _safe_text(r_exec.ExecutionStatusName if r_exec else "", ""),
+            _safe_text(r_exec.procedure if r_exec else "", ""),
+            _safe_text(r_vtype.ViolationTypeName if r_vtype else "", ""),
+            _safe_text(r_vtype.ViolationDescription if r_vtype else "", "")
         ]
-        
+
         row_cells = []
         for col_idx, val in enumerate(row_values, 1):
             c = openpyxl.cell.WriteOnlyCell(ws, value=val)
@@ -1121,11 +1166,11 @@ def export_excel(
 
     for col_idx, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
-        
+
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-    
+
     headers_res = {
         "Content-Disposition": f"attachment; filename=Sovereign_Violations_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     }
@@ -1155,7 +1200,7 @@ def export_pdf(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = query.yield_per(500).all()
+    results = hydrate_cases_rows(db, query.yield_per(500).all())
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
@@ -1165,24 +1210,24 @@ def export_pdf(
     title_style = ParagraphStyle('ArabicTitle', parent=styles['Heading1'], fontName=ARABIC_FONT_NAME, alignment=1, fontSize=16, leading=20)
     cell_style = ParagraphStyle('ArabicCell', fontName=ARABIC_FONT_NAME, alignment=1, fontSize=8, leading=10)
     header_style = ParagraphStyle('ArabicHeader', fontName=ARABIC_FONT_NAME, alignment=1, fontSize=9, leading=11, textColor=colors.whitesmoke)
-    
+
     title_text = ar_text("تقرير المحاضر والمخالفات - المنظومة السيادية المؤمنة")
     story.append(Paragraph(title_text, title_style))
     story.append(Spacer(1, 15))
 
     raw_headers = ["حالة التنفيذ", "السنة", "رقم القرار", "العنوان", "اسم المخالف", "رقم المحضر", "كود المتغير", "#"]
     headers = [Paragraph(ar_text(h), header_style) for h in raw_headers]
-    
+
     table_data = [headers]
 
     for idx, (r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype) in enumerate(results, 1):
         address_text = (r_loc.FullAddress if r_loc and r_loc.FullAddress else (r_off.OffenderAddress if r_off else '-'))
         row = [
-            Paragraph(ar_text(r_exec.ExecutionStatusName if r_exec else 'تنفيذ جزئي'), cell_style),
-            Paragraph(ar_text(str(r_case.year) if r_case and r_case.year else '-'), cell_style),
+            Paragraph(ar_text(r_exec.ExecutionStatusName if r_exec and r_exec.ExecutionStatusName else 'تنفيذ جزئي'), cell_style),
+            Paragraph(ar_text(_fmt_num_or_str(r_case.year if r_case else None) or '-'), cell_style),
             Paragraph(ar_text(r_case.DecisionNumber or '-'), cell_style),
             Paragraph(ar_text(address_text), cell_style),
-            Paragraph(ar_text(r_off.OffenderName if r_off else 'غير مسجل'), cell_style),
+            Paragraph(ar_text(r_off.OffenderName if r_off and r_off.OffenderName else 'غير مسجل'), cell_style),
             Paragraph(ar_text(r_case.CaseNumber or '-'), cell_style),
             Paragraph(ar_text(r_case.VariableCode or '-'), cell_style),
             Paragraph(ar_text(str(idx)), cell_style)
@@ -1231,12 +1276,14 @@ def export_kml(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = query.yield_per(500).all()
+    results = hydrate_cases_rows(db, query.yield_per(500).all())
     kml_items = []
     for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
         if r_case.Latitude and r_case.Longitude:
             try:
                 lat_val, lon_val = float(r_case.Latitude), float(r_case.Longitude)
+                if math.isnan(lat_val) or math.isnan(lon_val):
+                    continue
                 name = f"مخالفة: {r_off.OffenderName if r_off and r_off.OffenderName else 'غير مسجل'} - محضر: {r_case.CaseNumber or '-'}"
                 kml_items.append(f"""<Placemark><name><![CDATA[{name}]]></name><Point><coordinates>{lon_val},{lat_val},0</coordinates></Point></Placemark>""")
             except: continue
@@ -1258,10 +1305,10 @@ def serve_dashboard():
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script defer src="/static/alpine.min.js"></script>
+    <script src="/static/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/leaflet.css" />
+    <script src="/static/leaflet.js"></script>
     <style>
         body { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif !important; }
         #map { height: 340px; width: 100%; border-radius: 0.75rem; z-index: 10; }
@@ -1307,7 +1354,7 @@ def serve_dashboard():
 
         <div class="flex items-center gap-2.5 flex-wrap justify-end w-full lg:w-auto">
             <button @click="openModal()" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center gap-2 shadow cursor-pointer text-white"><i class="fa-solid fa-plus"></i> إضافة محضر</button>
-            
+
             <button @click="loadData(currentPage); loadStats();" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl text-sm font-semibold shadow cursor-pointer flex items-center gap-2 text-white">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -1322,7 +1369,7 @@ def serve_dashboard():
                     <button @click="openAuditModal()" class="bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition border border-purple-500/30 flex items-center gap-1.5 cursor-pointer shadow"><i class="fa-solid fa-user-shield"></i> سجل التدقيق</button>
                 </div>
             </template>
-            
+
             <div class="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-700">
                 <button @click="exportToExcel()" :disabled="isExporting" class="bg-emerald-600/20 hover:bg-emerald-600 disabled:opacity-50 text-emerald-300 hover:text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-excel"></i> إكسل</button>
                 <button @click="exportToPDF()" :disabled="isExporting" class="bg-amber-600/20 hover:bg-amber-600 disabled:opacity-50 text-amber-300 hover:text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"><i class="fa-solid fa-file-pdf"></i> PDF</button>
@@ -1518,7 +1565,7 @@ def serve_dashboard():
     <!-- Modal المحاضر الشامل بالتبويبات -->
     <div x-show="showModal" x-cloak class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 overflow-hidden">
         <div class="bg-slate-800 border border-slate-700 w-full max-w-7xl h-[92vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col" @click.away="closeModal()">
-            
+
             <div class="bg-slate-800 border-b border-slate-700 px-6 py-3 flex justify-between items-center shrink-0">
                 <h3 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
                     <i class="fa-solid fa-folder-tree text-blue-500"></i>
@@ -1663,7 +1710,7 @@ def serve_dashboard():
                             <span class="text-sm font-bold text-amber-400 flex items-center gap-2">
                                 <i class="fa-solid fa-box-archive"></i> الأرشيف الفعلي (مجلد D:\\Archive_Violations)
                             </span>
-                            <span class="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-300" 
+                            <span class="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-300"
                                   x-text="'المستند ' + (archiveList.length > 0 && !archiveList[0].includes('لا توجد') ? archiveIndex + 1 : 0) + ' من ' + (archiveList[0] && archiveList[0].includes('لا توجد') ? 0 : archiveList.length)">
                             </span>
                         </div>
@@ -1673,7 +1720,7 @@ def serve_dashboard():
                                 <div class="text-center space-y-3 w-full h-full flex flex-col items-center justify-center">
                                     <template x-if="archiveList[archiveIndex].match(/\\.(jpg|jpeg|png|gif)$/i)">
                                         <div class="w-full flex justify-center items-center overflow-auto">
-                                            <img :src="('/api/archive/file/' + archiveList[archiveIndex])" 
+                                            <img :src="('/api/archive/file/' + archiveList[archiveIndex])"
                                                  class="max-h-[450px] w-auto max-w-full rounded-xl border border-slate-700 object-contain shadow-2xl transition-all duration-300">
                                         </div>
                                     </template>
@@ -1683,9 +1730,9 @@ def serve_dashboard():
                                             <div class="text-sm text-slate-300 font-bold">ملف مستند PDF</div>
                                         </div>
                                     </template>
-                                    
+
                                     <div class="text-xs text-emerald-400 font-mono truncate max-w-lg dir-ltr text-center" x-text="archiveList[archiveIndex]"></div>
-                                    
+
                                     <div class="flex gap-2 flex-wrap justify-center pt-1">
                                         <button @click="openOffenderFolder()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow cursor-pointer flex items-center gap-1.5">
                                             <i class="fa-solid fa-folder-open"></i> فتح المجلد بالويندوز (D:)
@@ -2358,15 +2405,15 @@ def serve_dashboard():
                         let result = await res.json();
                         if (res.ok && result.status === 'success') {
                             alert("✔ " + result.message);
-                            this.closeModal(); 
-                            this.loadData(this.currentPage); 
+                            this.closeModal();
+                            this.loadData(this.currentPage);
                             this.loadStats();
-                        } else { 
-                            alert(result.detail || result.message || "خطأ في حفظ المحضر"); 
+                        } else {
+                            alert(result.detail || result.message || "خطأ في حفظ المحضر");
                             this.isSaving = false;
                         }
-                    } catch (e) { 
-                        alert("خطأ في الاتصال بالخادم"); 
+                    } catch (e) {
+                        alert("خطأ في الاتصال بالخادم");
                         this.isSaving = false;
                     }
                 },
