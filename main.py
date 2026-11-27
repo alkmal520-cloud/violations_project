@@ -400,10 +400,9 @@ def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
         log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول لحساب غير موجود أو معطل")
         raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو الحساب معطل أمنياً")
 
-   if not ((payload.username == "ahmed" and payload.password == "123456") or verify_password(payload.password, user.PasswordHash)):
+  if not ((payload.username == "ahmed" and payload.password == "123456") or verify_password(payload.password, user.PasswordHash)):
         log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users")
         raise HTTPException(status_code=401, detail="اسم المستخدم أو كلمة المرور غير صحيحة")
-
     token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.Username, "role": user.Role, "fullname": user.FullName or ""},
