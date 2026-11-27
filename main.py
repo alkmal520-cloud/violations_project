@@ -563,32 +563,106 @@ def search_cases(
     db: Session = Depends(get_db)
 ):
     try:
-        query = db.query(Case)
+        query = (
+            db.query(Case, Offender, Location, ExecutionStatus)
+            .outerjoin(Offender, Case.OffenderID == Offender.OffenderID)
+            .outerjoin(Location, Case.LocationID == Location.LocationID)
+            .outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)
+        )
 
         if q and q.strip():
             term = f"%{q.strip()}%"
-            query = query.filter(
-                (Case.VariableCode.ilike(term))
-                | (Case.CaseNumber.ilike(term))
-                | (Case.DecisionNumber.ilike(term))
-                | (Case.NationalID.ilike(term))
+            cond = (
+                Case.VariableCode.ilike(term)
+                | Case.CaseNumber.ilike(term)
+                | Case.DecisionNumber.ilike(term)
+                | Case.NationalID.ilike(term)
+                | Offender.OffenderName.ilike(term)
+                | Location.StreetName.ilike(term)
+                | Location.DistrictName.ilike(term)
             )
+            if hasattr(ExecutionStatus, "procedure"):
+                cond = cond | ExecutionStatus.procedure.ilike(term)
+            query = query.filter(cond)
+
         if var_code and var_code.strip():
             query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
+
         if case_no and case_no.strip():
             query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
+
         if decision_no and decision_no.strip():
             query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
+
         if national_id and national_id.strip():
-            query = query.filter(Case.NationalID.ilike(f"%{national_id.strip()}%"))
+            term_nid = f"%{national_id.strip()}%"
+            query = query.filter(
+                Case.NationalID.ilike(term_nid) | Offender.NationalID.ilike(term_nid)
+            )
+
+        if offender and offender.strip():
+            query = query.filter(Offender.OffenderName.ilike(f"%{offender.strip()}%"))
+
+        if address and address.strip():
+            term_addr = f"%{address.strip()}%"
+            query = query.filter(
+                Location.StreetName.ilike(term_addr) | Location.DistrictName.ilike(term_addr)
+            )
+
+        if district and district.strip():
+            query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
+
+        status_val = (status or "").strip()
+        if status_val and hasattr(ExecutionStatus, "procedure"):
+            query = query.filter(ExecutionStatus.procedure.ilike(f"%{status_val}%"))
+
+        vtype_val = (vtype or v_type or "").strip()
+        if vtype_val and hasattr(Case, "ViolationTypeName"):
+            query = query.filter(Case.ViolationTypeName.ilike(f"%{vtype_val}%"))
+
+        if lat and lat.strip() and hasattr(Case, "Latitude"):
+            query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
+
+        if lon and lon.strip() and hasattr(Case, "Longitude"):
+            query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
+
         if year is not None:
             query = query.filter(Case.year == str(year))
 
         total_count = query.count()
-        cases_list = query.order_by(Case.CaseID.desc()).offset((page - 1) * limit).limit(limit).all()
+        results = query.order_by(Case.CaseID.desc()).offset((page - 1) * limit).limit(limit).all()
 
         data = []
-        for r_case in cases_list:
+        for r_case, r_off, r_loc, r_exec in results:
+            off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
+            raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
+            nid_str = ""
+            if raw_nid is not None and str(raw_nid).strip() != "":
+                try:
+                    f_val = float(raw_nid)
+                    nid_str = str(int(f_val)) if not math.isnan(f_val) else ""
+                except (ValueError, TypeError):
+                    nid_str = str(raw_nid).strip()
+
+            street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
+            dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
+            full_addr = (getattr(r_loc, "FullAddress", None) if r_loc else None) or (
+                f"{street} - {dist}".strip(" -") if (street or dist) else ""
+            )
+
+            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or ""
+            exec_status_name = (
+                (getattr(r_exec, "ExecutionStatusName", None) if r_exec else None)
+                or proc_val
+                or "تنفيذ جزئي"
+            )
+
+            vtype_name = (
+                getattr(r_case, "ViolationTypeName", None)
+                or getattr(r_case, "ViolationType", None)
+                or ""
+            )
+
             data.append({
                 "CaseID": getattr(r_case, "CaseID", None),
                 "SerialNo": getattr(r_case, "SerialNo", "") or "",
@@ -605,19 +679,19 @@ def search_cases(
                 "Notes": getattr(r_case, "Notes", "") or "",
                 "Latitude": getattr(r_case, "Latitude", "") or "",
                 "Longitude": getattr(r_case, "Longitude", "") or "",
-                "OffenderName": "غير مسجل",
-                "OffenderNationalID": str(getattr(r_case, "NationalID", "") or ""),
-                "OffenderAddress": "",
-                "Phone": "",
-                "OffenderNotes": "",
-                "StreetName": "",
-                "DistrictName": "",
-                "FullAddress": "",
-                "Landmark": "",
-                "ExecutionStatusName": "تنفيذ جزئي",
-                "procedure": "",
-                "ExecutionLevel": "",
-                "ExecNotes": "",
+                "OffenderName": off_name,
+                "OffenderNationalID": nid_str,
+                "OffenderAddress": (getattr(r_off, "OffenderAddress", None) if r_off else None) or "",
+                "Phone": str(getattr(r_off, "Phone", "") or "") if r_off else "",
+                "OffenderNotes": (getattr(r_off, "Notes", None) if r_off else None) or "",
+                "StreetName": street,
+                "DistrictName": dist,
+                "FullAddress": full_addr,
+                "Landmark": (getattr(r_loc, "Landmark", None) if r_loc else None) or "",
+                "ExecutionStatusName": exec_status_name,
+                "procedure": proc_val,
+                "ExecutionLevel": (getattr(r_exec, "ExecutionLevel", None) if r_exec else None) or "",
+                "ExecNotes": (getattr(r_exec, "Notes", None) if r_exec else None) or "",
                 "HasAppeal": False,
                 "CourtDecision": "",
                 "CourtDecisionDate": None,
@@ -634,8 +708,8 @@ def search_cases(
                 "ReconciliationDate": "",
                 "FineAmount": None,
                 "ReconNotes": "",
-                "ViolationTypeName": "",
-                "ViolationDescription": ""
+                "ViolationTypeName": vtype_name,
+                "ViolationDescription": getattr(r_case, "ViolationDescription", "") or ""
             })
 
         return {
@@ -647,7 +721,7 @@ def search_cases(
             "data": data
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SEARCH_ERR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"خطأ في استعلام البحث: {str(e)}")
 
 # --- مسارات الإضافة والتعديل والأرشيف والتصدير المحسّنة ---
 @app.post("/api/cases")
