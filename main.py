@@ -578,14 +578,36 @@ def search_cases(
         except (ValueError, TypeError):
             return s
 
-    try:
-        query = db.query(Case)
+    def _text_col(model, col_name):
+        if model is None or not hasattr(model, col_name):
+            return None
+        col = getattr(model, col_name)
+        return col if isinstance(getattr(col, "type", None), String) else None
 
-        def _text_col(model, col_name):
-            if model is None or not hasattr(model, col_name):
-                return None
-            col = getattr(model, col_name)
-            return col if isinstance(getattr(col, "type", None), String) else None
+    def clean_str(val):
+        if val is None:
+            return ""
+        s = str(val).strip()
+        if not s or s.lower() in ("none", "null", "nan"):
+            return ""
+        try:
+            f = float(s)
+            if math.isnan(f):
+                return ""
+            return str(int(f)) if f.is_integer() else s
+        except (ValueError, TypeError):
+            return s
+
+    try:
+        g = globals()
+        m_off = g.get("Offender")
+        m_loc = g.get("Location")
+        m_exec = g.get("ExecutionStatus")
+        m_vtype = g.get("ViolationType")
+        m_judg = g.get("Judgement")
+        m_recon = g.get("Reconciliation")
+
+        query = db.query(Case)
 
         q_str = (q or "").strip()
         if q_str:
@@ -596,38 +618,34 @@ def search_cases(
                 if c is not None:
                     q_conds.append(c.ilike(term))
 
-            g = globals()
-            if "Offender" in g and g["Offender"] is not None:
-                m_off = g["Offender"]
+            if m_off is not None:
                 for cname in ("OffenderName", "NationalID"):
                     c = _text_col(m_off, cname)
-                    if c is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
-                        q_conds.append(
-                            Case.OffenderID.in_(
-                                db.query(m_off.OffenderID).filter(c.ilike(term))
-                            )
-                        )
+                    if c is not None:
+                        if hasattr(m_off, "CaseID") and hasattr(Case, "CaseID"):
+                            q_conds.append(Case.CaseID.in_(db.query(m_off.CaseID).filter(c.ilike(term))))
+                        elif hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                            q_conds.append(Case.OffenderID.in_(db.query(m_off.OffenderID).filter(c.ilike(term))))
 
-            if "Location" in g and g["Location"] is not None:
-                m_loc = g["Location"]
+            if m_loc is not None:
                 for cname in ("StreetName", "DistrictName", "FullAddress"):
                     c = _text_col(m_loc, cname)
-                    if c is not None and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
-                        q_conds.append(
-                            Case.LocationID.in_(
-                                db.query(m_loc.LocationID).filter(c.ilike(term))
-                            )
-                        )
+                    if c is not None:
+                        if hasattr(m_loc, "CaseID") and hasattr(Case, "CaseID"):
+                            q_conds.append(Case.CaseID.in_(db.query(m_loc.CaseID).filter(c.ilike(term))))
+                        elif hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                            q_conds.append(Case.LocationID.in_(db.query(m_loc.LocationID).filter(c.ilike(term))))
 
-            if "ExecutionStatus" in g and g["ExecutionStatus"] is not None:
-                m_exec = g["ExecutionStatus"]
-                c_proc = _text_col(m_exec, "procedure")
-                if c_proc is not None and hasattr(m_exec, "CaseID"):
-                    q_conds.append(
-                        Case.CaseID.in_(
-                            db.query(m_exec.CaseID).filter(c_proc.ilike(term))
-                        )
-                    )
+            if m_exec is not None and hasattr(m_exec, "CaseID") and hasattr(Case, "CaseID"):
+                for cname in ("ExecutionStatusName", "procedure"):
+                    c = _text_col(m_exec, cname)
+                    if c is not None:
+                        q_conds.append(Case.CaseID.in_(db.query(m_exec.CaseID).filter(c.ilike(term))))
+
+            if m_vtype is not None and hasattr(m_vtype, "CaseID") and hasattr(Case, "CaseID"):
+                c_vt = _text_col(m_vtype, "ViolationTypeName")
+                if c_vt is not None:
+                    q_conds.append(Case.CaseID.in_(db.query(m_vtype.CaseID).filter(c_vt.ilike(term))))
 
             if q_conds:
                 query = query.filter(or_(*q_conds))
@@ -652,74 +670,62 @@ def search_cases(
             c_nid = _text_col(Case, "NationalID")
             if c_nid is not None:
                 nid_conds.append(c_nid.ilike(nid_term))
-            g = globals()
-            if "Offender" in g and g["Offender"] is not None:
-                m_off = g["Offender"]
+            if m_off is not None:
                 c_onid = _text_col(m_off, "NationalID")
-                if c_onid is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
-                    nid_conds.append(
-                        Case.OffenderID.in_(
-                            db.query(m_off.OffenderID).filter(c_onid.ilike(nid_term))
-                        )
-                    )
+                if c_onid is not None:
+                    if hasattr(m_off, "CaseID") and hasattr(Case, "CaseID"):
+                        nid_conds.append(Case.CaseID.in_(db.query(m_off.CaseID).filter(c_onid.ilike(nid_term))))
+                    elif hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                        nid_conds.append(Case.OffenderID.in_(db.query(m_off.OffenderID).filter(c_onid.ilike(nid_term))))
             if nid_conds:
                 query = query.filter(or_(*nid_conds))
 
         off_s = (offender or "").strip()
-        if off_s:
-            g = globals()
-            if "Offender" in g and g["Offender"] is not None:
-                m_off = g["Offender"]
-                c_oname = _text_col(m_off, "OffenderName")
-                if c_oname is not None and hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
-                    query = query.filter(
-                        Case.OffenderID.in_(
-                            db.query(m_off.OffenderID).filter(c_oname.ilike(f"%{off_s}%"))
-                        )
-                    )
+        if off_s and m_off is not None:
+            c_oname = _text_col(m_off, "OffenderName")
+            if c_oname is not None:
+                if hasattr(m_off, "CaseID") and hasattr(Case, "CaseID"):
+                    query = query.filter(Case.CaseID.in_(db.query(m_off.CaseID).filter(c_oname.ilike(f"%{off_s}%"))))
+                elif hasattr(Case, "OffenderID") and hasattr(m_off, "OffenderID"):
+                    query = query.filter(Case.OffenderID.in_(db.query(m_off.OffenderID).filter(c_oname.ilike(f"%{off_s}%"))))
 
         addr_s = (address or "").strip()
-        if addr_s:
-            g = globals()
-            if "Location" in g and g["Location"] is not None:
-                m_loc = g["Location"]
-                addr_conds = []
-                for cname in ("StreetName", "DistrictName", "FullAddress"):
-                    c = _text_col(m_loc, cname)
-                    if c is not None:
-                        addr_conds.append(c.ilike(f"%{addr_s}%"))
-                if addr_conds and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
-                    query = query.filter(
-                        Case.LocationID.in_(
-                            db.query(m_loc.LocationID).filter(or_(*addr_conds))
-                        )
-                    )
+        if addr_s and m_loc is not None:
+            addr_conds = [
+                c.ilike(f"%{addr_s}%")
+                for cname in ("StreetName", "DistrictName", "FullAddress")
+                if (c := _text_col(m_loc, cname)) is not None
+            ]
+            if addr_conds:
+                if hasattr(m_loc, "CaseID") and hasattr(Case, "CaseID"):
+                    query = query.filter(Case.CaseID.in_(db.query(m_loc.CaseID).filter(or_(*addr_conds))))
+                elif hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                    query = query.filter(Case.LocationID.in_(db.query(m_loc.LocationID).filter(or_(*addr_conds))))
 
         dist_s = (district or "").strip()
-        if dist_s:
-            g = globals()
-            if "Location" in g and g["Location"] is not None:
-                m_loc = g["Location"]
-                c_dist = _text_col(m_loc, "DistrictName")
-                if c_dist is not None and hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
-                    query = query.filter(
-                        Case.LocationID.in_(
-                            db.query(m_loc.LocationID).filter(c_dist.ilike(f"%{dist_s}%"))
-                        )
-                    )
+        if dist_s and m_loc is not None:
+            c_dist = _text_col(m_loc, "DistrictName")
+            if c_dist is not None:
+                if hasattr(m_loc, "CaseID") and hasattr(Case, "CaseID"):
+                    query = query.filter(Case.CaseID.in_(db.query(m_loc.CaseID).filter(c_dist.ilike(f"%{dist_s}%"))))
+                elif hasattr(Case, "LocationID") and hasattr(m_loc, "LocationID"):
+                    query = query.filter(Case.LocationID.in_(db.query(m_loc.LocationID).filter(c_dist.ilike(f"%{dist_s}%"))))
 
         status_s = (status or "").strip()
-        if status_s:
-            g = globals()
-            if "ExecutionStatus" in g and g["ExecutionStatus"] is not None:
-                m_exec = g["ExecutionStatus"]
-                c_proc = _text_col(m_exec, "procedure")
-                if c_proc is not None and hasattr(m_exec, "CaseID"):
-                    query = query.filter(
-                        Case.CaseID.in_(
-                            db.query(m_exec.CaseID).filter(c_proc.ilike(f"%{status_s}%"))
-                        )
-                    )
+        if status_s and m_exec is not None and hasattr(m_exec, "CaseID") and hasattr(Case, "CaseID"):
+            stat_conds = [
+                c.ilike(f"%{status_s}%")
+                for cname in ("ExecutionStatusName", "procedure")
+                if (c := _text_col(m_exec, cname)) is not None
+            ]
+            if stat_conds:
+                query = query.filter(Case.CaseID.in_(db.query(m_exec.CaseID).filter(or_(*stat_conds))))
+
+        vtype_s = (vtype or v_type or "").strip()
+        if vtype_s and m_vtype is not None and hasattr(m_vtype, "CaseID") and hasattr(Case, "CaseID"):
+            c_vt = _text_col(m_vtype, "ViolationTypeName")
+            if c_vt is not None:
+                query = query.filter(Case.CaseID.in_(db.query(m_vtype.CaseID).filter(c_vt.ilike(f"%{vtype_s}%"))))
 
         if year is not None and hasattr(Case, "year"):
             col_y = Case.year
@@ -735,62 +741,72 @@ def search_cases(
         cases_page = query.offset((page - 1) * limit).limit(limit).all()
 
         case_ids = [_norm_id(getattr(c, "CaseID", None)) for c in cases_page]
-        case_ids = [x for x in case_ids if x is not None]
+        case_ids_set = {x for x in case_ids if x is not None}
 
-        off_ids = [_norm_id(getattr(c, "OffenderID", None)) for c in cases_page]
-        off_ids = [x for x in off_ids if x is not None]
+        off_ids_set = {
+            _norm_id(getattr(c, "OffenderID", None))
+            for c in cases_page
+            if _norm_id(getattr(c, "OffenderID", None)) is not None
+        }
+        loc_ids_set = {
+            _norm_id(getattr(c, "LocationID", None))
+            for c in cases_page
+            if _norm_id(getattr(c, "LocationID", None)) is not None
+        }
 
-        loc_ids = [_norm_id(getattr(c, "LocationID", None)) for c in cases_page]
-        loc_ids = [x for x in loc_ids if x is not None]
-
-        g = globals()
-
-        off_map = {}
-        if off_ids and "Offender" in g and g["Offender"] is not None and hasattr(g["Offender"], "OffenderID"):
-            m_off = g["Offender"]
+        off_by_case = {}
+        off_by_id = {}
+        if m_off is not None and (case_ids_set or off_ids_set):
             for o in db.query(m_off).all():
-                oid = _norm_id(getattr(o, "OffenderID", None))
-                if oid and oid in set(off_ids):
-                    off_map[oid] = o
+                if hasattr(m_off, "CaseID"):
+                    cid_o = _norm_id(getattr(o, "CaseID", None))
+                    if cid_o and cid_o in case_ids_set and cid_o not in off_by_case:
+                        off_by_case[cid_o] = o
+                if hasattr(m_off, "OffenderID"):
+                    oid_o = _norm_id(getattr(o, "OffenderID", None))
+                    if oid_o and oid_o in off_ids_set and oid_o not in off_by_id:
+                        off_by_id[oid_o] = o
 
-        loc_map = {}
-        if loc_ids and "Location" in g and g["Location"] is not None and hasattr(g["Location"], "LocationID"):
-            m_loc = g["Location"]
+        loc_by_case = {}
+        loc_by_id = {}
+        if m_loc is not None and (case_ids_set or loc_ids_set):
             for l in db.query(m_loc).all():
-                lid = _norm_id(getattr(l, "LocationID", None))
-                if lid and lid in set(loc_ids):
-                    loc_map[lid] = l
+                if hasattr(m_loc, "CaseID"):
+                    cid_l = _norm_id(getattr(l, "CaseID", None))
+                    if cid_l and cid_l in case_ids_set and cid_l not in loc_by_case:
+                        loc_by_case[cid_l] = l
+                if hasattr(m_loc, "LocationID"):
+                    lid_l = _norm_id(getattr(l, "LocationID", None))
+                    if lid_l and lid_l in loc_ids_set and lid_l not in loc_by_id:
+                        loc_by_id[lid_l] = l
 
         exec_map = {}
-        if case_ids and "ExecutionStatus" in g and g["ExecutionStatus"] is not None and hasattr(g["ExecutionStatus"], "CaseID"):
-            m_exec = g["ExecutionStatus"]
+        if m_exec is not None and case_ids_set and hasattr(m_exec, "CaseID"):
             for ex in db.query(m_exec).all():
-                cid = _norm_id(getattr(ex, "CaseID", None))
-                if cid and cid in set(case_ids) and cid not in exec_map:
-                    exec_map[cid] = ex
+                cid_e = _norm_id(getattr(ex, "CaseID", None))
+                if cid_e and cid_e in case_ids_set and cid_e not in exec_map:
+                    exec_map[cid_e] = ex
 
         vtype_map = {}
-        if "ViolationType" in g and g["ViolationType"] is not None:
-            m_vt = g["ViolationType"]
-            for vt in db.query(m_vt).all():
-                for key_attr in ("ViolationTypeID", "TypeID", "ID", "ViolationTypeName"):
-                    k_val = _norm_id(getattr(vt, key_attr, None))
-                    if k_val:
-                        vtype_map[k_val] = vt
+        if m_vtype is not None and case_ids_set and hasattr(m_vtype, "CaseID"):
+            for vt in db.query(m_vtype).all():
+                cid_v = _norm_id(getattr(vt, "CaseID", None))
+                if cid_v and cid_v in case_ids_set and cid_v not in vtype_map:
+                    vtype_map[cid_v] = vt
 
-        def clean_str(val):
-            if val is None:
-                return ""
-            s = str(val).strip()
-            if not s or s.lower() in ("none", "null", "nan"):
-                return ""
-            try:
-                f = float(s)
-                if math.isnan(f):
-                    return ""
-                return str(int(f)) if f.is_integer() else s
-            except (ValueError, TypeError):
-                return s
+        judg_map = {}
+        if m_judg is not None and case_ids_set and hasattr(m_judg, "CaseID"):
+            for jd in db.query(m_judg).all():
+                cid_j = _norm_id(getattr(jd, "CaseID", None))
+                if cid_j and cid_j in case_ids_set and cid_j not in judg_map:
+                    judg_map[cid_j] = jd
+
+        recon_map = {}
+        if m_recon is not None and case_ids_set and hasattr(m_recon, "CaseID"):
+            for rc in db.query(m_recon).all():
+                cid_r = _norm_id(getattr(rc, "CaseID", None))
+                if cid_r and cid_r in case_ids_set and cid_r not in recon_map:
+                    recon_map[cid_r] = rc
 
         data = []
         for r_case in cases_page:
@@ -798,32 +814,38 @@ def search_cases(
             oid_norm = _norm_id(getattr(r_case, "OffenderID", None))
             lid_norm = _norm_id(getattr(r_case, "LocationID", None))
 
-            r_off = off_map.get(oid_norm) if oid_norm else None
-            r_loc = loc_map.get(lid_norm) if lid_norm else None
-            r_exec = exec_map.get(cid_norm) if cid_norm else None
-
-            vt_raw = (
-                getattr(r_case, "ViolationTypeID", None)
-                or getattr(r_case, "ViolationTypeName", None)
-                or getattr(r_case, "ViolationType", None)
+            r_off = (off_by_case.get(cid_norm) if cid_norm else None) or (
+                off_by_id.get(oid_norm) if oid_norm else None
             )
-            r_vt = vtype_map.get(_norm_id(vt_raw)) if vt_raw is not None else None
+            r_loc = (loc_by_case.get(cid_norm) if cid_norm else None) or (
+                loc_by_id.get(lid_norm) if lid_norm else None
+            )
+            r_exec = exec_map.get(cid_norm) if cid_norm else None
+            r_vt = vtype_map.get(cid_norm) if cid_norm else None
+            r_jd = judg_map.get(cid_norm) if cid_norm else None
+            r_rc = recon_map.get(cid_norm) if cid_norm else None
 
             off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
             raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
             off_nid = clean_str(raw_nid)
+
             street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
             dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
             full_addr = (
                 (getattr(r_loc, "FullAddress", None) if r_loc else None)
                 or (f"{street} - {dist}".strip(" -") if (street or dist) else "")
             )
-            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or ""
+
+            exec_status_name = (
+                (getattr(r_exec, "ExecutionStatusName", None) if r_exec else None)
+                or (getattr(r_exec, "procedure", None) if r_exec else None)
+                or "تنفيذ جزئي"
+            )
+            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or exec_status_name
 
             vtype_name = (
                 (getattr(r_vt, "ViolationTypeName", None) if r_vt else None)
                 or getattr(r_case, "ViolationTypeName", None)
-                or clean_str(vt_raw)
                 or ""
             )
 
@@ -852,28 +874,28 @@ def search_cases(
                 "DistrictName": dist,
                 "FullAddress": full_addr,
                 "Landmark": getattr(r_loc, "Landmark", "") or "",
-                "ExecutionStatusName": proc_val or "تنفيذ جزئي",
+                "ExecutionStatusName": exec_status_name,
                 "procedure": proc_val,
                 "ExecutionLevel": getattr(r_exec, "ExecutionLevel", "") or "",
                 "ExecNotes": getattr(r_exec, "Notes", "") or "",
-                "HasAppeal": False,
-                "CourtDecision": "",
-                "CourtDecisionDate": None,
-                "DeputyGovernorDecision": None,
-                "DateDeputyGovernorDecision": None,
-                "FinalJudgement": None,
-                "FinalJudgementDate": None,
-                "TheFine": None,
-                "NonExecutionNumber": None,
-                "DepartmentIssueDate": None,
-                "FelonyNumber": None,
-                "JudgementNotes": "",
-                "ReconciliationNumber": "",
-                "ReconciliationDate": "",
-                "FineAmount": None,
-                "ReconNotes": "",
+                "HasAppeal": bool(getattr(r_jd, "HasAppeal", False)) if r_jd else False,
+                "CourtDecision": getattr(r_jd, "CourtDecision", "") or "" if r_jd else "",
+                "CourtDecisionDate": getattr(r_jd, "CourtDecisionDate", None) if r_jd else None,
+                "DeputyGovernorDecision": getattr(r_jd, "DeputyGovernorDecision", None) if r_jd else None,
+                "DateDeputyGovernorDecision": getattr(r_jd, "DateDeputyGovernorDecision", None) if r_jd else None,
+                "FinalJudgement": getattr(r_jd, "FinalJudgement", None) if r_jd else None,
+                "FinalJudgementDate": getattr(r_jd, "FinalJudgementDate", None) if r_jd else None,
+                "TheFine": getattr(r_jd, "TheFine", None) if r_jd else None,
+                "NonExecutionNumber": getattr(r_jd, "NonExecutionNumber", None) if r_jd else None,
+                "DepartmentIssueDate": getattr(r_jd, "DepartmentIssueDate", None) if r_jd else None,
+                "FelonyNumber": getattr(r_jd, "FelonyNumber", None) if r_jd else None,
+                "JudgementNotes": getattr(r_jd, "Notes", "") or "" if r_jd else "",
+                "ReconciliationNumber": getattr(r_rc, "ReconciliationNumber", "") or "" if r_rc else "",
+                "ReconciliationDate": getattr(r_rc, "ReconciliationDate", "") or "" if r_rc else "",
+                "FineAmount": getattr(r_rc, "FineAmount", None) if r_rc else None,
+                "ReconNotes": getattr(r_rc, "Notes", "") or "" if r_rc else "",
                 "ViolationTypeName": vtype_name,
-                "ViolationDescription": getattr(r_vt, "ViolationDescription", "") if r_vt else ""
+                "ViolationDescription": getattr(r_vt, "ViolationDescription", "") or "" if r_vt else ""
             })
 
         return {
