@@ -1,20 +1,19 @@
 import os
 import math
-import csv
 import io
 import glob
 import json
+import secrets
 import subprocess
-import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, status, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, BigInteger, Text, Boolean, Float, func, or_, and_
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, BigInteger, Text, Boolean, Float, func, or_
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from passlib.context import CryptContext
 import jwt
@@ -22,35 +21,38 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# استيرادات توليد ملفات PDF باللغة العربية
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# --- تسجيل خط عربي من النظام لمنع ظاهرة المربعات السوداء ---
 ARABIC_FONT_NAME = 'Helvetica'
-font_path = r"C:\Windows\Fonts\arial.ttf"
-if os.path.exists(font_path):
-    try:
-        pdfmetrics.registerFont(TTFont('ArabicArial', font_path))
-        ARABIC_FONT_NAME = 'ArabicArial'
-    except Exception:
-        pass
+font_candidates = [
+    os.getenv("ARABIC_FONT_PATH", ""),
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\tahoma.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+]
+for f_path in font_candidates:
+    if f_path and os.path.exists(f_path):
+        try:
+            pdfmetrics.registerFont(TTFont('ArabicArial', f_path))
+            ARABIC_FONT_NAME = 'ArabicArial'
+            break
+        except Exception:
+            pass
 
 def ar_text(text):
     if not text or str(text).strip() in ["", "None", "nan"]:
         return "-"
     reshaped_text = arabic_reshaper.reshape(str(text))
-    bidi_text = get_display(reshaped_text)
-    return bidi_text
+    return get_display(reshaped_text)
 
-# --- إعدادات الأمان والتشفير العالمي ---
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "SUPER_SECURE_ENTERPRISE_KEY_2026_987654321_ROO7")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480
@@ -72,14 +74,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 def decode_access_token(token: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="انتهت صلاحية الجلسة الأمنية، يرجى إعادة تسجيل الدخول")
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="رمز المصادقة غير صالح")
 
-# --- اتصال قاعدة البيانات PostgreSQL (محلي / شبكة محلية / سحابي عبر متغيرات البيئة) ---
 POSTGRES_USER = os.getenv("DB_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("DB_PASSWORD", "roo71900")
 POSTGRES_HOST = os.getenv("DB_HOST", "localhost")
@@ -101,7 +101,6 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_size=20
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- النماذج والجداول السيادية ---
 class User(Base):
     __tablename__ = "tbl_users"
     UserID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
@@ -124,7 +123,7 @@ class AuditLog(Base):
 class Case(Base):
     __tablename__ = "tbl_cases"
     CaseID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    SerialNo = Column(BigInteger, nullable=True)
+    SerialNo = Column(BigInteger, index=True, nullable=True)
     VariableCode = Column(Text, index=True, nullable=True)
     VariableDate = Column(Text, nullable=True)
     CaseNumber = Column(Text, index=True, nullable=True)
@@ -136,13 +135,13 @@ class Case(Base):
     DecisionDate = Column(Text, nullable=True)
     AreaSize = Column(Float, nullable=True)
     Notes = Column(Text, nullable=True)
-    Latitude = Column(Text, nullable=True)
-    Longitude = Column(Text, nullable=True)
+    Latitude = Column(Text, index=True, nullable=True)
+    Longitude = Column(Text, index=True, nullable=True)
 
 class Offender(Base):
     __tablename__ = "tbl_offenders"
     OffenderID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     OffenderName = Column(Text, index=True, nullable=True)
     NationalID = Column(Float, index=True, nullable=True)
     OffenderAddress = Column(Text, nullable=True)
@@ -152,16 +151,16 @@ class Offender(Base):
 class Location(Base):
     __tablename__ = "tbl_locations"
     LocationID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     StreetName = Column(Text, index=True, nullable=True)
     DistrictName = Column(Text, index=True, nullable=True)
-    FullAddress = Column(Text, nullable=True)
+    FullAddress = Column(Text, index=True, nullable=True)
     Landmark = Column(Text, nullable=True)
 
 class ExecutionStatus(Base):
     __tablename__ = "tbl_executionstatus"
     ExecutionStatusID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     ExecutionStatusName = Column(Text, index=True, nullable=True)
     procedure = Column(Text, nullable=True)
     ExecutionLevel = Column("Execution level", Text, nullable=True)
@@ -171,7 +170,7 @@ class ExecutionStatus(Base):
 class Judgement(Base):
     __tablename__ = "tbl_judgements"
     JudgementID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     HasAppeal = Column(Boolean, nullable=True)
     CourtDecision = Column(Text, nullable=True)
     CourtDecisionDate = Column(Float, nullable=True)
@@ -188,7 +187,7 @@ class Judgement(Base):
 class Reconciliation(Base):
     __tablename__ = "tbl_reconciliation"
     ReconciliationID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     ReconciliationNumber = Column(Text, nullable=True)
     ReconciliationDate = Column(Text, nullable=True)
     FineAmount = Column(Float, nullable=True)
@@ -199,14 +198,14 @@ class Reconciliation(Base):
 class ViolationType(Base):
     __tablename__ = "tbl_violationtypes"
     ViolationTypeID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
-    ViolationTypeName = Column(Text, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
+    ViolationTypeName = Column(Text, index=True, nullable=True)
     ViolationDescription = Column(Text, nullable=True)
 
 class Archive(Base):
     __tablename__ = "tbl_Archive"
     ArchiveID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    CaseID = Column(BigInteger, nullable=True)
+    CaseID = Column(BigInteger, index=True, nullable=True)
     FileType = Column(Text, nullable=True)
     FileName = Column(Text, nullable=True)
     FilePath = Column(Text, nullable=True)
@@ -238,52 +237,20 @@ def get_db():
 
 def log_audit(db: Session, username: str, action: str, table: str, details: str):
     try:
-        log = AuditLog(Username=username or "مجهول", ActionType=action, TargetTable=table, Details=details, Timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        db.add(log); db.commit()
-    except: pass
+        log = AuditLog(
+            Username=username or "مجهول",
+            ActionType=action,
+            TargetTable=table,
+            Details=details,
+            Timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+        db.add(log)
+        db.commit()
+    except Exception:
+        db.rollback()
 
 def get_current_user_payload(credentials: HTTPAuthorizationCredentials = Depends(security)):
     return decode_access_token(credentials.credentials)
-
-def _norm_key(val):
-    if val is None:
-        return None
-    s = str(val).strip()
-    if not s or s.lower() in ("none", "null", "nan"):
-        return None
-    try:
-        f = float(s)
-        if math.isnan(f):
-            return None
-        return str(int(f)) if f.is_integer() else s
-    except (ValueError, TypeError):
-        return s
-
-def _fmt_num_or_str(val):
-    if val is None:
-        return ""
-    if isinstance(val, float):
-        if math.isnan(val):
-            return ""
-        return str(int(val)) if val.is_integer() else str(val)
-    s = str(val).strip()
-    if not s or s.lower() in ("none", "null", "nan"):
-        return ""
-    try:
-        f = float(s)
-        if math.isnan(f):
-            return ""
-        return str(int(f)) if f.is_integer() else s
-    except (ValueError, TypeError):
-        return s
-
-def _safe_text(val, default=""):
-    if val is None:
-        return default
-    s = str(val).strip()
-    if not s or s.lower() in ("none", "null", "nan"):
-        return default
-    return s
 
 def build_filtered_cases_query(
     db: Session,
@@ -302,230 +269,77 @@ def build_filtered_cases_query(
     vtype: Optional[str] = "",
     year: Optional[int] = None,
 ):
-    query = db.query(Case)
+    query = db.query(Case, Offender, Location, ExecutionStatus, Judgement, Reconciliation, ViolationType)\
+              .outerjoin(Offender, Case.CaseID == Offender.CaseID)\
+              .outerjoin(Location, Case.CaseID == Location.CaseID)\
+              .outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)\
+              .outerjoin(Judgement, Case.CaseID == Judgement.CaseID)\
+              .outerjoin(Reconciliation, Case.CaseID == Reconciliation.CaseID)\
+              .outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
 
     if var_code and var_code.strip():
         query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
-
     if case_no and case_no.strip():
         query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
-
     if decision_no and decision_no.strip():
         query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
+    if national_id and national_id.strip():
+        try:
+            n_val = float(national_id.strip())
+            query = query.filter(Offender.NationalID == n_val)
+        except Exception:
+            query = query.filter(Offender.NationalID == -999999)
 
     if lat and lat.strip():
         query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
-
     if lon and lon.strip():
         query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
 
-    if year is not None and year != "":
-        try:
-            y_int = int(year)
-            query = query.filter(Case.year == y_int)
-        except (ValueError, TypeError):
-            pass
-
-    if national_id and national_id.strip():
-        nid_clean = national_id.strip()
-        nid_like = f"%{nid_clean}%"
-        try:
-            nid_num = float(nid_clean)
-            if math.isnan(nid_num):
-                nid_num = None
-        except (ValueError, TypeError):
-            nid_num = None
-
-        off_q = db.query(Offender.CaseID).filter(
-            Offender.CaseID.isnot(None),
-            Offender.NationalID == nid_num
-        ) if nid_num is not None else db.query(Offender.CaseID).filter(
-            Offender.CaseID.isnot(None),
-            func.cast(Offender.NationalID, Text).ilike(nid_like)
-        )
-        query = query.filter(Case.CaseID.in_(off_q))
-
     if offender and offender.strip():
-        off_like = f"%{offender.strip()}%"
-        off_name_q = db.query(Offender.CaseID).filter(
-            Offender.CaseID.isnot(None),
-            Offender.OffenderName.ilike(off_like)
-        )
-        query = query.filter(Case.CaseID.in_(off_name_q))
-
+        query = query.filter(Offender.OffenderName.ilike(f"%{offender.strip()}%"))
     if address and address.strip():
-        addr_like = f"%{address.strip()}%"
-        loc_addr_q = db.query(Location.CaseID).filter(
-            Location.CaseID.isnot(None),
-            or_(
-                Location.FullAddress.ilike(addr_like),
-                Location.StreetName.ilike(addr_like),
-                Location.DistrictName.ilike(addr_like),
-                Location.Landmark.ilike(addr_like),
-            )
-        )
-        off_addr_q = db.query(Offender.CaseID).filter(
-            Offender.CaseID.isnot(None),
-            Offender.OffenderAddress.ilike(addr_like)
-        )
-        query = query.filter(or_(Case.CaseID.in_(loc_addr_q), Case.CaseID.in_(off_addr_q)))
-
-    if district and district.strip():
-        dist_like = f"%{district.strip()}%"
-        dist_q = db.query(Location.CaseID).filter(
-            Location.CaseID.isnot(None),
-            Location.DistrictName.ilike(dist_like)
-        )
-        query = query.filter(Case.CaseID.in_(dist_q))
+        addr_filter = f"%{address.strip()}%"
+        query = query.filter(or_(
+            Location.FullAddress.ilike(addr_filter),
+            Location.StreetName.ilike(addr_filter),
+            Offender.OffenderAddress.ilike(addr_filter)
+        ))
 
     effective_vtype = (v_type or vtype or "").strip()
     if effective_vtype:
-        vt_q = db.query(ViolationType.CaseID).filter(
-            ViolationType.CaseID.isnot(None),
-            ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%")
-        )
-        query = query.filter(Case.CaseID.in_(vt_q))
-
-    if status and status.strip():
-        st_val = status.strip()
-        st_q = db.query(ExecutionStatus.CaseID).filter(
-            ExecutionStatus.CaseID.isnot(None),
-            or_(
-                ExecutionStatus.ExecutionStatusName == st_val,
-                ExecutionStatus.ExecutionStatusName.ilike(f"%{st_val}%"),
-                ExecutionStatus.procedure.ilike(f"%{st_val}%"),
-            )
-        )
-        query = query.filter(Case.CaseID.in_(st_q))
+        query = query.filter(ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%"))
 
     if q and q.strip():
         clean_q = q.strip()
-        search_like = f"%{clean_q}%"
+        search_filter = f"%{clean_q}%"
         try:
-            q_num = float(clean_q)
-            if math.isnan(q_num):
-                q_num = None
-        except (ValueError, TypeError):
-            q_num = None
+            numeric_val = float(clean_q)
+        except Exception:
+            numeric_val = None
 
-        case_conds = [
-            Case.VariableCode.ilike(search_like),
-            Case.CaseNumber.ilike(search_like),
-            Case.DecisionNumber.ilike(search_like),
-            Case.Latitude.ilike(search_like),
-            Case.Longitude.ilike(search_like),
-            Case.Notes.ilike(search_like),
+        filters = [
+            Case.VariableCode.ilike(search_filter),
+            Case.CaseNumber.ilike(search_filter),
+            Case.DecisionNumber.ilike(search_filter),
+            Case.Latitude.ilike(search_filter),
+            Case.Longitude.ilike(search_filter),
+            Offender.OffenderName.ilike(search_filter),
+            Location.FullAddress.ilike(search_filter),
+            Location.DistrictName.ilike(search_filter),
+            ViolationType.ViolationTypeName.ilike(search_filter)
         ]
-        if q_num is not None and q_num.is_integer():
-            case_conds.append(Case.CaseID == int(q_num))
-            case_conds.append(Case.SerialNo == int(q_num))
+        if numeric_val is not None:
+            filters.append(Offender.NationalID == numeric_val)
+        query = query.filter(or_(*filters))
 
-        off_conds = [
-            Offender.OffenderName.ilike(search_like),
-            Offender.OffenderAddress.ilike(search_like),
-            func.cast(Offender.NationalID, Text).ilike(search_like),
-        ]
-        if q_num is not None:
-            off_conds.append(Offender.NationalID == q_num)
+    if status and status.strip():
+        query = query.filter(ExecutionStatus.ExecutionStatusName == status.strip())
+    if district and district.strip():
+        query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
+    if year:
+        query = query.filter(Case.year == year)
 
-        loc_conds = [
-            Location.FullAddress.ilike(search_like),
-            Location.StreetName.ilike(search_like),
-            Location.DistrictName.ilike(search_like),
-            Location.Landmark.ilike(search_like),
-        ]
-
-        vt_conds = [
-            ViolationType.ViolationTypeName.ilike(search_like),
-            ViolationType.ViolationDescription.ilike(search_like),
-        ]
-
-        q_sub_off = db.query(Offender.CaseID).filter(Offender.CaseID.isnot(None), or_(*off_conds))
-        q_sub_loc = db.query(Location.CaseID).filter(Location.CaseID.isnot(None), or_(*loc_conds))
-        q_sub_vt = db.query(ViolationType.CaseID).filter(ViolationType.CaseID.isnot(None), or_(*vt_conds))
-
-        query = query.filter(
-            or_(
-                *case_conds,
-                Case.CaseID.in_(q_sub_off),
-                Case.CaseID.in_(q_sub_loc),
-                Case.CaseID.in_(q_sub_vt),
-            )
-        )
-
-    return query.order_by(Case.CaseID.desc())
-
-def hydrate_cases_rows(db: Session, cases_list):
-    if not cases_list:
-        return []
-
-    case_keys = []
-    for c in cases_list:
-        k = _norm_key(c.CaseID)
-        if k is not None:
-            case_keys.append(k)
-    unique_keys = list(dict.fromkeys(case_keys))
-
-    raw_ids = []
-    for c in cases_list:
-        if c.CaseID is not None:
-            raw_ids.append(c.CaseID)
-            try:
-                raw_ids.append(int(c.CaseID))
-            except Exception:
-                pass
-            raw_ids.append(str(c.CaseID))
-
-    off_map = {}
-    loc_map = {}
-    exec_map = {}
-    judg_map = {}
-    recon_map = {}
-    vtype_map = {}
-
-    if unique_keys:
-        for row in db.query(Offender).filter(Offender.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in off_map:
-                off_map[k] = row
-
-        for row in db.query(Location).filter(Location.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in loc_map:
-                loc_map[k] = row
-
-        for row in db.query(ExecutionStatus).filter(ExecutionStatus.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in exec_map:
-                exec_map[k] = row
-
-        for row in db.query(Judgement).filter(Judgement.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in judg_map:
-                judg_map[k] = row
-
-        for row in db.query(Reconciliation).filter(Reconciliation.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in recon_map:
-                recon_map[k] = row
-
-        for row in db.query(ViolationType).filter(ViolationType.CaseID.in_(raw_ids)).all():
-            k = _norm_key(row.CaseID)
-            if k and k not in vtype_map:
-                vtype_map[k] = row
-
-    hydrated = []
-    for r_case in cases_list:
-        ck = _norm_key(r_case.CaseID)
-        r_off = off_map.get(ck) if ck else None
-        r_loc = loc_map.get(ck) if ck else None
-        r_exec = exec_map.get(ck) if ck else None
-        r_judg = judg_map.get(ck) if ck else None
-        r_recon = recon_map.get(ck) if ck else None
-        r_vtype = vtype_map.get(ck) if ck else None
-        hydrated.append((r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype))
-
-    return hydrated
+    return query.order_by(Case.SerialNo.desc().nullslast(), Case.CaseID.desc())
 
 class LoginPayload(BaseModel):
     username: str
@@ -585,16 +399,16 @@ class CaseFullPayload(BaseModel):
     ViolationTypeName: Optional[str] = ""
     ViolationDescription: Optional[str] = ""
 
-# --- مسارات المصادقة والمستخدمين ---
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.Username == payload.username).first()
+    uname = (payload.username or "").strip()
+    user = db.query(User).filter(User.Username == uname).first()
     if not user or not user.IsActive:
-        log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول لحساب غير موجود أو معطل")
+        log_audit(db, uname, "LOGIN_FAILED", "tbl_users", "محاولة دخول لحساب غير موجود أو معطل")
         raise HTTPException(status_code=401, detail="اسم المستخدم غير موجود أو الحساب معطل أمنياً")
 
     if not verify_password(payload.password, user.PasswordHash):
-        log_audit(db, payload.username, "LOGIN_FAILED", "tbl_users", "محاولة دخول فاشلة")
+        log_audit(db, uname, "LOGIN_FAILED", "tbl_users", "محاولة دخول فاشلة")
         raise HTTPException(status_code=401, detail="اسم المستخدم أو كلمة المرور غير صحيحة")
 
     token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -614,58 +428,104 @@ def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
 
 @app.get("/api/admin/users")
 def get_all_users(user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     users = db.query(User).all()
-    return {"status": "success", "data": [{"UserID": u.UserID, "Username": u.Username, "FullName": u.FullName or "", "Role": u.Role, "IsActive": u.IsActive, "CreatedAt": u.CreatedAt or ""} for u in users]}
+    return {
+        "status": "success",
+        "data": [
+            {
+                "UserID": u.UserID,
+                "Username": u.Username,
+                "FullName": u.FullName or "",
+                "Role": u.Role,
+                "IsActive": u.IsActive,
+                "CreatedAt": u.CreatedAt or ""
+            }
+            for u in users
+        ]
+    }
 
 @app.post("/api/admin/users")
 def create_user(payload: UserPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     existing = db.query(User).filter(User.Username == payload.Username).first()
-    if existing: return {"status": "error", "message": "اسم المستخدم موجود مسبقاً"}
+    if existing:
+        return {"status": "error", "message": "اسم المستخدم موجود مسبقاً"}
     hashed_pwd = get_password_hash(payload.Password if payload.Password else "SecurePass@2026")
-    new_user = User(Username=payload.Username, PasswordHash=hashed_pwd, FullName=payload.FullName, Role=payload.Role, IsActive=payload.IsActive, CreatedAt=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    db.add(new_user); db.commit()
+    new_user = User(
+        Username=payload.Username,
+        PasswordHash=hashed_pwd,
+        FullName=payload.FullName,
+        Role=payload.Role,
+        IsActive=payload.IsActive,
+        CreatedAt=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    )
+    db.add(new_user)
+    db.commit()
     log_audit(db, user_data.get("sub"), "INSERT", "tbl_users", f"إنشاء مستخدم: {payload.Username}")
     return {"status": "success", "message": "تم إنشاء المستخدم بنجاح"}
 
 @app.put("/api/admin/users/{user_id}")
 def update_user(user_id: int, payload: UserPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     u = db.query(User).filter(User.UserID == user_id).first()
-    if not u: raise HTTPException(status_code=404, detail="غير موجود")
-    u.FullName = payload.FullName; u.Role = payload.Role; u.IsActive = payload.IsActive
-    if payload.Password and payload.Password.strip(): u.PasswordHash = get_password_hash(payload.Password)
+    if not u:
+        raise HTTPException(status_code=404, detail="غير موجود")
+    u.FullName = payload.FullName
+    u.Role = payload.Role
+    u.IsActive = payload.IsActive
+    if payload.Password and payload.Password.strip():
+        u.PasswordHash = get_password_hash(payload.Password)
     db.commit()
     log_audit(db, user_data.get("sub"), "UPDATE", "tbl_users", f"تعديل المستخدم ID: {user_id}")
     return {"status": "success", "message": "تم التعديل بنجاح"}
 
 @app.delete("/api/admin/users/{user_id}")
 def delete_user(user_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     u = db.query(User).filter(User.UserID == user_id).first()
     if u:
-        uname = u.Username; db.delete(u); db.commit()
+        uname = u.Username
+        db.delete(u)
+        db.commit()
         log_audit(db, user_data.get("sub"), "DELETE", "tbl_users", f"حذف المستخدم: {uname}")
     return {"status": "success", "message": "تم الحذف بنجاح"}
 
 @app.get("/api/users/stats")
 def get_user_activity_stats(user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     user_records_count = db.query(AuditLog.Username, func.count(AuditLog.LogID)).filter(AuditLog.ActionType == "INSERT", AuditLog.TargetTable == "tbl_cases").group_by(AuditLog.Username).all()
     records_summary = {uname: cnt for uname, cnt in user_records_count if uname}
     activity_counts = db.query(AuditLog.Username, AuditLog.ActionType, func.count(AuditLog.LogID)).group_by(AuditLog.Username, AuditLog.ActionType).all()
     users_summary = {}
     for uname, action, cnt in activity_counts:
-        if not uname: continue
-        if uname not in users_summary: users_summary[uname] = {"INSERT": 0, "UPDATE": 0, "DELETE": 0, "LOGIN": 0, "TOTAL_ADDED_RECORDS": records_summary.get(uname, 0)}
-        if action in users_summary[uname]: users_summary[uname][action] = cnt
+        if not uname:
+            continue
+        if uname not in users_summary:
+            users_summary[uname] = {"INSERT": 0, "UPDATE": 0, "DELETE": 0, "LOGIN": 0, "TOTAL_ADDED_RECORDS": records_summary.get(uname, 0)}
+        if action in users_summary[uname]:
+            users_summary[uname][action] = cnt
     logs = db.query(AuditLog).order_by(AuditLog.LogID.desc()).limit(100).all()
     return {
         "status": "success",
         "summary": users_summary,
         "records_summary": records_summary,
-        "logs": [{"LogID": l.LogID, "Username": l.Username, "ActionType": l.ActionType, "TargetTable": l.TargetTable, "Details": l.Details, "Timestamp": l.Timestamp} for l in logs]
+        "logs": [
+            {
+                "LogID": l.LogID,
+                "Username": l.Username,
+                "ActionType": l.ActionType,
+                "TargetTable": l.TargetTable,
+                "Details": l.Details,
+                "Timestamp": l.Timestamp
+            }
+            for l in logs
+        ]
     }
 
 @app.get("/api/next-serial")
@@ -689,11 +549,13 @@ def get_stats(user_data: dict = Depends(get_current_user_payload), db: Session =
         "violation_types": violation_types
     }
 
-BACKUP_DIR = os.getenv("BACKUP_DIR", r"D:\Backups_Violations")
+DEFAULT_BACKUP_DIR = r"D:\Backups_Violations" if os.name == "nt" else "/tmp/Backups_Violations"
+BACKUP_DIR = os.getenv("BACKUP_DIR", DEFAULT_BACKUP_DIR)
 
 @app.post("/api/admin/backup")
 def create_backup(user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     try:
         os.makedirs(BACKUP_DIR, exist_ok=True)
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -714,7 +576,8 @@ def create_backup(user_data: dict = Depends(get_current_user_payload), db: Sessi
 
 @app.get("/api/admin/backups")
 def list_backups(user_data: dict = Depends(get_current_user_payload)):
-    if user_data.get("role") != "Admin": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") != "Admin":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     files = []
     if os.path.exists(BACKUP_DIR):
         for f in os.listdir(BACKUP_DIR):
@@ -728,10 +591,8 @@ def list_backups(user_data: dict = Depends(get_current_user_payload)):
     return {"status": "success", "backups": files}
 
 @app.get("/api/admin/backup/download/{filename}")
-def download_backup(filename: str, token: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    user_payload = None
-    if token:
-        user_payload = decode_access_token(token)
+def download_backup(filename: str, token: Optional[str] = Query(None)):
+    user_payload = decode_access_token(token) if token else None
     if not user_payload or user_payload.get("role") != "Admin":
         raise HTTPException(status_code=403, detail="غير مسموح")
     safe_name = os.path.basename(filename)
@@ -740,7 +601,6 @@ def download_backup(filename: str, token: Optional[str] = Query(None), db: Sessi
         return FileResponse(file_path, filename=safe_name, media_type='application/json')
     raise HTTPException(status_code=404, detail="الملف غير موجود")
 
-# --- محرك البحث الفائق والمحسن ---
 @app.get("/api/cases/search")
 def search_cases(
     q: Optional[str] = "",
@@ -762,84 +622,79 @@ def search_cases(
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
-    try:
-        query = build_filtered_cases_query(
-            db=db, q=q, var_code=var_code, case_no=case_no, decision_no=decision_no,
-            national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
-            v_type=v_type, status=status, district=district, vtype=vtype, year=year
-        )
+    query = build_filtered_cases_query(
+        db=db, q=q, var_code=var_code, case_no=case_no, decision_no=decision_no,
+        national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
+        v_type=v_type, status=status, district=district, vtype=vtype, year=year
+    )
 
-        total_count = query.count()
-        cases_page = query.offset((page - 1) * limit).limit(limit).all()
-        results = hydrate_cases_rows(db, cases_page)
+    total_count = query.count()
+    results = query.offset((page - 1) * limit).limit(limit).all()
 
-        data = []
-        for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
-            exec_name = _safe_text(r_exec.ExecutionStatusName if r_exec else "", "") or _safe_text(r_exec.procedure if r_exec else "", "تنفيذ جزئي")
-            data.append({
-                "CaseID": r_case.CaseID,
-                "SerialNo": _fmt_num_or_str(r_case.SerialNo),
-                "VariableCode": _safe_text(r_case.VariableCode, "-"),
-                "VariableDate": _safe_text(r_case.VariableDate, ""),
-                "CaseNumber": _safe_text(r_case.CaseNumber, "-"),
-                "CaseDate": _safe_text(r_case.CaseDate, ""),
-                "DecisionNumber": _safe_text(r_case.DecisionNumber, "-"),
-                "DecisionDate": _safe_text(r_case.DecisionDate, ""),
-                "year": _fmt_num_or_str(r_case.year),
-                "StopNumber": _safe_text(r_case.StopNumber, ""),
-                "AdminNumber": _safe_text(r_case.AdminNumber, ""),
-                "AreaSize": r_case.AreaSize if r_case.AreaSize is not None and not (isinstance(r_case.AreaSize, float) and math.isnan(r_case.AreaSize)) else 0.0,
-                "Notes": _safe_text(r_case.Notes, ""),
-                "Latitude": _safe_text(r_case.Latitude, ""),
-                "Longitude": _safe_text(r_case.Longitude, ""),
-                "OffenderName": _safe_text(r_off.OffenderName if r_off else "", "غير مسجل"),
-                "OffenderNationalID": _fmt_num_or_str(r_off.NationalID if r_off else None),
-                "OffenderAddress": _safe_text(r_off.OffenderAddress if r_off else "", ""),
-                "Phone": _fmt_num_or_str(r_off.Phone if r_off else None),
-                "OffenderNotes": _safe_text(r_off.Notes if r_off else "", ""),
-                "StreetName": _safe_text(r_loc.StreetName if r_loc else "", ""),
-                "DistrictName": _safe_text(r_loc.DistrictName if r_loc else "", ""),
-                "FullAddress": _safe_text(r_loc.FullAddress if r_loc else "", ""),
-                "Landmark": _safe_text(r_loc.Landmark if r_loc else "", ""),
-                "ExecutionStatusName": exec_name,
-                "procedure": _safe_text(r_exec.procedure if r_exec else "", ""),
-                "ExecutionLevel": _safe_text(r_exec.ExecutionLevel if r_exec else "", ""),
-                "ExecNotes": _safe_text(r_exec.Notes if r_exec else "", ""),
-                "HasAppeal": bool(r_judg.HasAppeal) if r_judg and r_judg.HasAppeal is not None else False,
-                "CourtDecision": _safe_text(r_judg.CourtDecision if r_judg else "", ""),
-                "CourtDecisionDate": r_judg.CourtDecisionDate if r_judg else None,
-                "DeputyGovernorDecision": r_judg.DeputyGovernorDecision if r_judg else None,
-                "DateDeputyGovernorDecision": r_judg.DateDeputyGovernorDecision if r_judg else None,
-                "FinalJudgement": r_judg.FinalJudgement if r_judg else None,
-                "FinalJudgementDate": r_judg.FinalJudgementDate if r_judg else None,
-                "TheFine": r_judg.TheFine if r_judg else None,
-                "NonExecutionNumber": r_judg.NonExecutionNumber if r_judg else None,
-                "DepartmentIssueDate": r_judg.DepartmentIssueDate if r_judg else None,
-                "FelonyNumber": r_judg.FelonyNumber if r_judg else None,
-                "JudgementNotes": _safe_text(r_judg.Notes if r_judg else "", ""),
-                "ReconciliationNumber": _safe_text(r_recon.ReconciliationNumber if r_recon else "", ""),
-                "ReconciliationDate": _safe_text(r_recon.ReconciliationDate if r_recon else "", ""),
-                "FineAmount": r_recon.FineAmount if r_recon else None,
-                "ReconNotes": _safe_text(r_recon.Notes if r_recon else "", ""),
-                "ViolationTypeName": _safe_text(r_vtype.ViolationTypeName if r_vtype else "", ""),
-                "ViolationDescription": _safe_text(r_vtype.ViolationDescription if r_vtype else "", "")
-            })
+    data = []
+    for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
+        data.append({
+            "CaseID": r_case.CaseID,
+            "SerialNo": r_case.SerialNo or "",
+            "VariableCode": r_case.VariableCode or "-",
+            "VariableDate": r_case.VariableDate or "",
+            "CaseNumber": r_case.CaseNumber or "-",
+            "CaseDate": r_case.CaseDate or "",
+            "DecisionNumber": r_case.DecisionNumber or "-",
+            "DecisionDate": r_case.DecisionDate or "",
+            "year": r_case.year or "",
+            "StopNumber": r_case.StopNumber or "",
+            "AdminNumber": r_case.AdminNumber or "",
+            "AreaSize": r_case.AreaSize or 0.0,
+            "Notes": r_case.Notes or "",
+            "Latitude": r_case.Latitude or "",
+            "Longitude": r_case.Longitude or "",
+            "OffenderName": r_off.OffenderName if r_off else "غير مسجل",
+            "OffenderNationalID": str(int(r_off.NationalID)) if r_off and r_off.NationalID and not math.isnan(r_off.NationalID) else "",
+            "OffenderAddress": r_off.OffenderAddress if r_off else "",
+            "Phone": str(int(r_off.Phone)) if r_off and r_off.Phone and not math.isnan(r_off.Phone) else "",
+            "OffenderNotes": r_off.Notes if r_off else "",
+            "StreetName": r_loc.StreetName if r_loc else "",
+            "DistrictName": r_loc.DistrictName if r_loc else "",
+            "FullAddress": r_loc.FullAddress if r_loc else "",
+            "Landmark": r_loc.Landmark if r_loc else "",
+            "ExecutionStatusName": r_exec.ExecutionStatusName if r_exec else "تنفيذ جزئي",
+            "procedure": r_exec.procedure if r_exec else "",
+            "ExecutionLevel": r_exec.ExecutionLevel if r_exec else "",
+            "ExecNotes": r_exec.Notes if r_exec else "",
+            "HasAppeal": r_judg.HasAppeal if r_judg else False,
+            "CourtDecision": r_judg.CourtDecision if r_judg else "",
+            "CourtDecisionDate": r_judg.CourtDecisionDate if r_judg else None,
+            "DeputyGovernorDecision": r_judg.DeputyGovernorDecision if r_judg else None,
+            "DateDeputyGovernorDecision": r_judg.DateDeputyGovernorDecision if r_judg else None,
+            "FinalJudgement": r_judg.FinalJudgement if r_judg else None,
+            "FinalJudgementDate": r_judg.FinalJudgementDate if r_judg else None,
+            "TheFine": r_judg.TheFine if r_judg else None,
+            "NonExecutionNumber": r_judg.NonExecutionNumber if r_judg else None,
+            "DepartmentIssueDate": r_judg.DepartmentIssueDate if r_judg else None,
+            "FelonyNumber": r_judg.FelonyNumber if r_judg else None,
+            "JudgementNotes": r_judg.Notes if r_judg else "",
+            "ReconciliationNumber": r_recon.ReconciliationNumber if r_recon else "",
+            "ReconciliationDate": r_recon.ReconciliationDate if r_recon else "",
+            "FineAmount": r_recon.FineAmount if r_recon else None,
+            "ReconNotes": r_recon.Notes if r_recon else "",
+            "ViolationTypeName": r_vtype.ViolationTypeName if r_vtype else "",
+            "ViolationDescription": r_vtype.ViolationDescription if r_vtype else ""
+        })
 
-        return {
-            "status": "success",
-            "total": total_count,
-            "page": page,
-            "limit": limit,
-            "total_pages": math.ceil(total_count / limit) if total_count > 0 else 1,
-            "data": data
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"خطأ في استعلام البحث: {str(e)}")
+    return {
+        "status": "success",
+        "total": total_count,
+        "page": page,
+        "limit": limit,
+        "total_pages": math.ceil(total_count / limit) if total_count > 0 else 1,
+        "data": data
+    }
 
-# --- مسارات الإضافة والتعديل والأرشيف والتصدير المحسّنة ---
 @app.post("/api/cases")
 def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") == "Viewer": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") == "Viewer":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     try:
         if payload.CaseNumber and payload.CaseNumber.strip() and payload.CaseNumber != "-":
             existing_case = db.query(Case).filter(Case.CaseNumber == payload.CaseNumber.strip(), Case.year == payload.year).first()
@@ -853,7 +708,8 @@ def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_
             DecisionDate=payload.DecisionDate or None, AreaSize=payload.AreaSize, Notes=payload.Notes or None,
             Latitude=payload.Latitude or None, Longitude=payload.Longitude or None
         )
-        db.add(new_case); db.flush()
+        db.add(new_case)
+        db.flush()
         cid = new_case.CaseID
 
         db.add(Offender(CaseID=cid, OffenderName=payload.OffenderName or None, NationalID=payload.OffenderNationalID, OffenderAddress=payload.OffenderAddress or None, Phone=payload.Phone, Notes=payload.OffenderNotes or None))
@@ -865,63 +721,92 @@ def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_
 
         db.commit()
         log_audit(db, user_data.get("sub"), "INSERT", "tbl_cases", f"إضافة محضر جديد ID: {cid}")
-        return {"status": "success", "message": "تم إضافة المحضر بنجاح"}
+        return {"status": "success", "message": "تم إضافة المحضر بنجاح", "CaseID": cid}
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": str(e)}
 
 @app.put("/api/cases/{case_id}")
 def update_case(case_id: int, payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") == "Viewer": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") == "Viewer":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     try:
         c = db.query(Case).filter(Case.CaseID == case_id).first()
-        if not c: raise HTTPException(status_code=404, detail="غير موجود")
-        c.SerialNo = payload.SerialNo; c.VariableCode = payload.VariableCode or None; c.VariableDate = payload.VariableDate or None
-        c.CaseNumber = payload.CaseNumber or None; c.CaseDate = payload.CaseDate or None; c.year = payload.year
-        c.StopNumber = payload.StopNumber or None; c.AdminNumber = payload.AdminNumber or None; c.DecisionNumber = payload.DecisionNumber or None
-        c.DecisionDate = payload.DecisionDate or None; c.AreaSize = payload.AreaSize; c.Notes = payload.Notes or None
-        c.Latitude = payload.Latitude or None; c.Longitude = payload.Longitude or None
+        if not c:
+            raise HTTPException(status_code=404, detail="غير موجود")
+        c.SerialNo = payload.SerialNo
+        c.VariableCode = payload.VariableCode or None
+        c.VariableDate = payload.VariableDate or None
+        c.CaseNumber = payload.CaseNumber or None
+        c.CaseDate = payload.CaseDate or None
+        c.year = payload.year
+        c.StopNumber = payload.StopNumber or None
+        c.AdminNumber = payload.AdminNumber or None
+        c.DecisionNumber = payload.DecisionNumber or None
+        c.DecisionDate = payload.DecisionDate or None
+        c.AreaSize = payload.AreaSize
+        c.Notes = payload.Notes or None
+        c.Latitude = payload.Latitude or None
+        c.Longitude = payload.Longitude or None
 
         off = db.query(Offender).filter(Offender.CaseID == case_id).first()
         if off:
-            off.OffenderName = payload.OffenderName or None; off.NationalID = payload.OffenderNationalID
-            off.OffenderAddress = payload.OffenderAddress or None; off.Phone = payload.Phone; off.Notes = payload.OffenderNotes or None
+            off.OffenderName = payload.OffenderName or None
+            off.NationalID = payload.OffenderNationalID
+            off.OffenderAddress = payload.OffenderAddress or None
+            off.Phone = payload.Phone
+            off.Notes = payload.OffenderNotes or None
         else:
             db.add(Offender(CaseID=case_id, OffenderName=payload.OffenderName or None, NationalID=payload.OffenderNationalID, OffenderAddress=payload.OffenderAddress or None, Phone=payload.Phone, Notes=payload.OffenderNotes or None))
 
         loc = db.query(Location).filter(Location.CaseID == case_id).first()
         if loc:
-            loc.StreetName = payload.StreetName or None; loc.DistrictName = payload.DistrictName or None
-            loc.FullAddress = payload.FullAddress or None; loc.Landmark = payload.Landmark or None
+            loc.StreetName = payload.StreetName or None
+            loc.DistrictName = payload.DistrictName or None
+            loc.FullAddress = payload.FullAddress or None
+            loc.Landmark = payload.Landmark or None
         else:
             db.add(Location(CaseID=case_id, StreetName=payload.StreetName or None, DistrictName=payload.DistrictName or None, FullAddress=payload.FullAddress or None, Landmark=payload.Landmark or None))
 
         ex = db.query(ExecutionStatus).filter(ExecutionStatus.CaseID == case_id).first()
         if ex:
-            ex.ExecutionStatusName = payload.ExecutionStatusName or "تنفيذ جزئي"; ex.procedure = payload.procedure or None
-            ex.ExecutionLevel = payload.ExecutionLevel or None; ex.Notes = payload.ExecNotes or None
+            ex.ExecutionStatusName = payload.ExecutionStatusName or "تنفيذ جزئي"
+            ex.procedure = payload.procedure or None
+            ex.ExecutionLevel = payload.ExecutionLevel or None
+            ex.Notes = payload.ExecNotes or None
         else:
             db.add(ExecutionStatus(CaseID=case_id, ExecutionStatusName=payload.ExecutionStatusName or "تنفيذ جزئي", procedure=payload.procedure or None, ExecutionLevel=payload.ExecutionLevel or None, Notes=payload.ExecNotes or None))
 
         jd = db.query(Judgement).filter(Judgement.CaseID == case_id).first()
         if jd:
-            jd.HasAppeal = payload.HasAppeal; jd.CourtDecision = payload.CourtDecision or None; jd.CourtDecisionDate = payload.CourtDecisionDate
-            jd.DeputyGovernorDecision = payload.DeputyGovernorDecision; jd.DateDeputyGovernorDecision = payload.DateDeputyGovernorDecision
-            jd.FinalJudgement = payload.FinalJudgement; jd.FinalJudgementDate = payload.FinalJudgementDate; jd.TheFine = payload.TheFine
-            jd.NonExecutionNumber = payload.NonExecutionNumber; jd.DepartmentIssueDate = payload.DepartmentIssueDate; jd.FelonyNumber = payload.FelonyNumber; jd.Notes = payload.JudgementNotes or None
+            jd.HasAppeal = payload.HasAppeal
+            jd.CourtDecision = payload.CourtDecision or None
+            jd.CourtDecisionDate = payload.CourtDecisionDate
+            jd.DeputyGovernorDecision = payload.DeputyGovernorDecision
+            jd.DateDeputyGovernorDecision = payload.DateDeputyGovernorDecision
+            jd.FinalJudgement = payload.FinalJudgement
+            jd.FinalJudgementDate = payload.FinalJudgementDate
+            jd.TheFine = payload.TheFine
+            jd.NonExecutionNumber = payload.NonExecutionNumber
+            jd.DepartmentIssueDate = payload.DepartmentIssueDate
+            jd.FelonyNumber = payload.FelonyNumber
+            jd.Notes = payload.JudgementNotes or None
         else:
             db.add(Judgement(CaseID=case_id, HasAppeal=payload.HasAppeal, CourtDecision=payload.CourtDecision or None, CourtDecisionDate=payload.CourtDecisionDate, DeputyGovernorDecision=payload.DeputyGovernorDecision, DateDeputyGovernorDecision=payload.DateDeputyGovernorDecision, FinalJudgement=payload.FinalJudgement, FinalJudgementDate=payload.FinalJudgementDate, TheFine=payload.TheFine, NonExecutionNumber=payload.NonExecutionNumber, DepartmentIssueDate=payload.DepartmentIssueDate, FelonyNumber=payload.FelonyNumber, Notes=payload.JudgementNotes or None))
 
         rc = db.query(Reconciliation).filter(Reconciliation.CaseID == case_id).first()
         if rc:
-            rc.ReconciliationNumber = payload.ReconciliationNumber or None; rc.ReconciliationDate = payload.ReconciliationDate or None
-            rc.FineAmount = payload.FineAmount; rc.Notes = payload.ReconNotes or None
+            rc.ReconciliationNumber = payload.ReconciliationNumber or None
+            rc.ReconciliationDate = payload.ReconciliationDate or None
+            rc.FineAmount = payload.FineAmount
+            rc.Notes = payload.ReconNotes or None
         else:
             db.add(Reconciliation(CaseID=case_id, ReconciliationNumber=payload.ReconciliationNumber or None, ReconciliationDate=payload.ReconciliationDate or None, FineAmount=payload.FineAmount, Notes=payload.ReconNotes or None))
 
         vt = db.query(ViolationType).filter(ViolationType.CaseID == case_id).first()
         if vt:
-            vt.ViolationTypeName = payload.ViolationTypeName or None; vt.ViolationDescription = payload.ViolationDescription or None
+            vt.ViolationTypeName = payload.ViolationTypeName or None
+            vt.ViolationDescription = payload.ViolationDescription or None
         else:
             db.add(ViolationType(CaseID=case_id, ViolationTypeName=payload.ViolationTypeName or None, ViolationDescription=payload.ViolationDescription or None))
 
@@ -934,7 +819,8 @@ def update_case(case_id: int, payload: CaseFullPayload, user_data: dict = Depend
 
 @app.delete("/api/cases/{case_id}")
 def delete_case(case_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") not in ["Admin", "Supervisor"]: raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") not in ["Admin", "Supervisor"]:
+        raise HTTPException(status_code=403, detail="غير مسموح")
     try:
         db.query(Case).filter(Case.CaseID == case_id).delete()
         db.query(ExecutionStatus).filter(ExecutionStatus.CaseID == case_id).delete()
@@ -943,6 +829,7 @@ def delete_case(case_id: int, user_data: dict = Depends(get_current_user_payload
         db.query(Judgement).filter(Judgement.CaseID == case_id).delete()
         db.query(Reconciliation).filter(Reconciliation.CaseID == case_id).delete()
         db.query(ViolationType).filter(ViolationType.CaseID == case_id).delete()
+        db.query(Archive).filter(Archive.CaseID == case_id).delete()
         db.commit()
         log_audit(db, user_data.get("sub"), "DELETE", "tbl_cases", f"حذف سجل ID: {case_id}")
         return {"status": "success", "message": "تم الحذف بنجاح"}
@@ -950,13 +837,15 @@ def delete_case(case_id: int, user_data: dict = Depends(get_current_user_payload
         db.rollback()
         return {"status": "error", "message": str(e)}
 
-ARCHIVE_BASE_DIR = os.getenv("ARCHIVE_BASE_DIR", r"D:\Archive_Violations")
+DEFAULT_ARCHIVE_DIR = r"D:\Archive_Violations" if os.name == "nt" else "/tmp/Archive_Violations"
+ARCHIVE_BASE_DIR = os.getenv("ARCHIVE_BASE_DIR", DEFAULT_ARCHIVE_DIR)
+os.makedirs(ARCHIVE_BASE_DIR, exist_ok=True)
 
 def get_offender_folder_and_prefix(db: Session, case_id: int):
     case = db.query(Case).filter(Case.CaseID == case_id).first()
     offender = db.query(Offender).filter(Offender.CaseID == case_id).first()
     offender_name = (offender.OffenderName if offender and offender.OffenderName else "مخالف_غير_معروف").strip()
-    offender_name = "".join([c for c in offender_name if c.isalnum() or c in (' ', '_', '-')]).strip()
+    offender_name = "".join([c for c in offender_name if c.isalnum() or c in (' ', '_', '-')]).strip() or "مخالف_غير_معروف"
     file_prefix = "مستند"
     if case:
         if case.VariableCode and case.VariableCode.strip() and case.VariableCode != "-":
@@ -970,88 +859,111 @@ def get_case_archive_files(case_id: int, user_data: dict = Depends(get_current_u
     offender_name, file_prefix = get_offender_folder_and_prefix(db, case_id)
     offender_dir = os.path.join(ARCHIVE_BASE_DIR, offender_name)
     found_files = []
+
+    db_archives = db.query(Archive).filter(Archive.CaseID == case_id).order_by(Archive.ArchiveID.desc()).all()
+    for arch in db_archives:
+        rel_candidate = (arch.FilePath or arch.FileName or "").replace("\\", "/").lstrip("/")
+        if rel_candidate and rel_candidate not in found_files:
+            full_candidate = os.path.join(ARCHIVE_BASE_DIR, *rel_candidate.split("/"))
+            if os.path.exists(full_candidate):
+                found_files.append(rel_candidate)
+
     if os.path.exists(offender_dir):
         pattern = os.path.join(offender_dir, f"{file_prefix}_*.*")
         for file_path in glob.glob(pattern):
             rel_path = os.path.join(offender_name, os.path.basename(file_path)).replace("\\", "/")
             if rel_path not in found_files:
                 found_files.append(rel_path)
-    return {"status": "success", "files": found_files}
+
+    return {"status": "success", "files": found_files, "archive_dir": ARCHIVE_BASE_DIR}
 
 @app.get("/api/archive/file/{path:path}")
 def serve_archive_file(path: str):
-    file_path = os.path.join(ARCHIVE_BASE_DIR, path)
-    if os.path.exists(file_path):
+    clean_parts = [p for p in path.replace("\\", "/").split("/") if p and p != ".."]
+    file_path = os.path.join(ARCHIVE_BASE_DIR, *clean_parts)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
         return FileResponse(file_path)
-    raise HTTPException(status_code=404, detail="الملف غير موجود على القرص")
+    raise HTTPException(status_code=404, detail="الملف غير موجود على الخادم")
 
 @app.get("/api/archive/open-folder/{case_id}")
 def open_offender_folder(case_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
     offender_name, _ = get_offender_folder_and_prefix(db, case_id)
     offender_dir = os.path.join(ARCHIVE_BASE_DIR, offender_name)
     os.makedirs(offender_dir, exist_ok=True)
-    try:
-        subprocess.Popen(f'explorer "{offender_dir}"')
-        return {"status": "success", "message": "تم فتح مجلد الأرشيف على الويندوز"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if os.name == "nt":
+        try:
+            subprocess.Popen(f'explorer "{offender_dir}"')
+            return {"status": "success", "message": "تم فتح مجلد الأرشيف"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "success",
+        "message": f"التشغيل السحابي نشط: يتم حفظ ملفات الأرشيف تلقائياً في ({offender_dir}) ويمكن استعراضها وتحميلها من جميع الأجهزة."
+    }
 
 @app.post("/api/cases/{case_id}/archive/upload")
 async def upload_archive_file(case_id: int, file: UploadFile = File(...), user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") == "Viewer": raise HTTPException(status_code=403, detail="غير مسموح")
+    if user_data.get("role") == "Viewer":
+        raise HTTPException(status_code=403, detail="غير مسموح")
     offender_name, file_prefix = get_offender_folder_and_prefix(db, case_id)
     offender_dir = os.path.join(ARCHIVE_BASE_DIR, offender_name)
     os.makedirs(offender_dir, exist_ok=True)
-    ext = os.path.splitext(file.filename)[1]
-    safe_filename = f"{file_prefix}_{int(datetime.now().timestamp())}{ext}"
+    ext = os.path.splitext(file.filename or "document.pdf")[1] or ".pdf"
+    safe_ext = "".join([c for c in ext if c.isalnum() or c == "."]) or ".pdf"
+    safe_filename = f"{file_prefix}_{int(datetime.now().timestamp())}_{secrets.token_hex(2)}{safe_ext}"
     file_path = os.path.join(offender_dir, safe_filename)
     try:
         contents = await file.read()
         with open(file_path, "wb") as f:
             f.write(contents)
         rel_p = os.path.join(offender_name, safe_filename).replace("\\", "/")
+        db.add(Archive(
+            CaseID=case_id,
+            FileType=safe_ext.lstrip(".").upper(),
+            FileName=safe_filename,
+            FilePath=rel_p,
+            UploadDate=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ))
+        db.commit()
+        log_audit(db, user_data.get("sub"), "UPLOAD", "tbl_Archive", f"رفع وأرشفة مستند: {rel_p}")
         return {"status": "success", "filename": rel_p}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/cases/{case_id}/archive/scan")
 def scan_and_save_document(case_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
-    if user_data.get("role") == "Viewer": raise HTTPException(status_code=403, detail="غير مسموح")
-    offender_name, file_prefix = get_offender_folder_and_prefix(db, case_id)
+    if user_data.get("role") == "Viewer":
+        raise HTTPException(status_code=403, detail="غير مسموح")
+    offender_name, _ = get_offender_folder_and_prefix(db, case_id)
     offender_dir = os.path.join(ARCHIVE_BASE_DIR, offender_name)
     os.makedirs(offender_dir, exist_ok=True)
-    try:
-        pythoncom.CoInitialize()
-        wia = win32com.client.Dispatch("WIA.CommonDialog")
-        image_file = wia.ShowAcquireImage()
-        if image_file:
-            safe_filename = f"{file_prefix}_scan_{int(datetime.now().timestamp())}.jpg"
-            file_path = os.path.join(offender_dir, safe_filename)
-            image_file.SaveFile(file_path)
-            rel_p = os.path.join(offender_name, safe_filename).replace("\\", "/")
-            log_audit(db, user_data.get("sub"), "SCAN", "tbl_Archive", f"مسح ضوئي مباشر وحفظ: {rel_p}")
-            return {"status": "success", "message": "تم المسح الضوئي وحفظ المستند في الأرشيف وقاعدة البيانات بنجاح", "filename": rel_p}
-        else:
-            return {"status": "error", "message": "تم إلغاء عملية المسح الضوئي من قبل المستخدم"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"تعذر الاتصال بالماسح الضوئي أو تنفيذ المسح: {str(e)}")
-    finally:
-        try: pythoncom.CoUninitialize()
-        except: pass
+    return {
+        "status": "cloud_upload_required",
+        "message": "الأرشفة تعمل سحابياً على جميع الأجهزة: قم بالمسح الضوئي من جهازك ثم استخدم زر (رفع ملف / مسح ضوئي) لحفظ المستند مباشرة في أرشيف السجل وقاعدة البيانات."
+    }
 
 @app.delete("/api/archive/file/{path:path}")
-def delete_archive_file(path: str, user_data: dict = Depends(get_current_user_payload)):
-    if user_data.get("role") not in ["Admin", "Supervisor"]: raise HTTPException(status_code=403, detail="غير مسموح")
-    file_path = os.path.join(ARCHIVE_BASE_DIR, path)
+def delete_archive_file(path: str, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
+    if user_data.get("role") not in ["Admin", "Supervisor"]:
+        raise HTTPException(status_code=403, detail="غير مسموح")
+    clean_parts = [p for p in path.replace("\\", "/").split("/") if p and p != ".."]
+    rel_clean = "/".join(clean_parts)
+    file_path = os.path.join(ARCHIVE_BASE_DIR, *clean_parts)
+    deleted_any = False
     if os.path.exists(file_path):
         try:
             os.remove(file_path)
-            return {"status": "success", "message": "تم حذف الملف من الأرشيف بنجاح"}
+            deleted_any = True
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+    db.query(Archive).filter(or_(Archive.FilePath == rel_clean, Archive.FileName == os.path.basename(rel_clean))).delete(synchronize_session=False)
+    db.commit()
+    if deleted_any or rel_clean:
+        log_audit(db, user_data.get("sub"), "DELETE_ARCHIVE", "tbl_Archive", f"حذف ملف أرشيف: {rel_clean}")
+        return {"status": "success", "message": "تم حذف الملف من الأرشيف بنجاح"}
     raise HTTPException(status_code=404, detail="الملف غير موجود")
 
-# --- التصدير المحسّن (Excel & PDF & KML) مع تطبيق كافة فلاتر البحث بدقة ---
 @app.get("/api/cases/export-excel")
 def export_excel(
     q: Optional[str] = "",
@@ -1076,7 +988,7 @@ def export_excel(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = hydrate_cases_rows(db, query.yield_per(500).all())
+    results = query.yield_per(500).all()
 
     headers = [
         "م", "معرف السجل", "مسلسل", "كود المتغير", "تاريخ المتغير",
@@ -1114,37 +1026,37 @@ def export_excel(
     col_widths = {idx + 1: max(len(h) + 4, 13) for idx, h in enumerate(headers)}
 
     for idx, (r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype) in enumerate(results, 1):
-        nat_id_str = _fmt_num_or_str(r_off.NationalID if r_off else None)
-        phone_str = _fmt_num_or_str(r_off.Phone if r_off else None)
+        nat_id_str = str(int(r_off.NationalID)) if r_off and r_off.NationalID and not math.isnan(r_off.NationalID) else ""
+        phone_str = str(int(r_off.Phone)) if r_off and r_off.Phone and not math.isnan(r_off.Phone) else ""
 
         row_values = [
             idx,
             r_case.CaseID if r_case else "",
-            _fmt_num_or_str(r_case.SerialNo if r_case else None),
-            _safe_text(r_case.VariableCode if r_case else "", ""),
-            _safe_text(r_case.VariableDate if r_case else "", ""),
-            _safe_text(r_case.CaseNumber if r_case else "", ""),
-            _safe_text(r_case.CaseDate if r_case else "", ""),
-            _fmt_num_or_str(r_case.year if r_case else None),
-            _safe_text(r_case.StopNumber if r_case else "", ""),
-            _safe_text(r_case.AdminNumber if r_case else "", ""),
-            _safe_text(r_case.DecisionNumber if r_case else "", ""),
-            _safe_text(r_case.DecisionDate if r_case else "", ""),
-            r_case.AreaSize if r_case and r_case.AreaSize is not None and not (isinstance(r_case.AreaSize, float) and math.isnan(r_case.AreaSize)) else "",
-            _safe_text(r_case.Notes if r_case else "", ""),
-            _safe_text(r_case.Latitude if r_case else "", ""),
-            _safe_text(r_case.Longitude if r_case else "", ""),
-            _safe_text(r_off.OffenderName if r_off else "", ""),
+            r_case.SerialNo if r_case else "",
+            r_case.VariableCode if r_case else "",
+            r_case.VariableDate if r_case else "",
+            r_case.CaseNumber if r_case else "",
+            r_case.CaseDate if r_case else "",
+            r_case.year if r_case else "",
+            r_case.StopNumber if r_case else "",
+            r_case.AdminNumber if r_case else "",
+            r_case.DecisionNumber if r_case else "",
+            r_case.DecisionDate if r_case else "",
+            r_case.AreaSize if r_case else "",
+            r_case.Notes if r_case else "",
+            r_case.Latitude if r_case else "",
+            r_case.Longitude if r_case else "",
+            r_off.OffenderName if r_off else "",
             nat_id_str,
-            _safe_text(r_off.OffenderAddress if r_off else "", ""),
+            r_off.OffenderAddress if r_off else "",
             phone_str,
-            _safe_text(r_loc.StreetName if r_loc else "", ""),
-            _safe_text(r_loc.DistrictName if r_loc else "", ""),
-            _safe_text(r_loc.FullAddress if r_loc else "", ""),
-            _safe_text(r_exec.ExecutionStatusName if r_exec else "", ""),
-            _safe_text(r_exec.procedure if r_exec else "", ""),
-            _safe_text(r_vtype.ViolationTypeName if r_vtype else "", ""),
-            _safe_text(r_vtype.ViolationDescription if r_vtype else "", "")
+            r_loc.StreetName if r_loc else "",
+            r_loc.DistrictName if r_loc else "",
+            r_loc.FullAddress if r_loc else "",
+            r_exec.ExecutionStatusName if r_exec else "",
+            r_exec.procedure if r_exec else "",
+            r_vtype.ViolationTypeName if r_vtype else "",
+            r_vtype.ViolationDescription if r_vtype else ""
         ]
 
         row_cells = []
@@ -1198,7 +1110,7 @@ def export_pdf(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = hydrate_cases_rows(db, query.yield_per(500).all())
+    results = query.yield_per(500).all()
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
@@ -1209,23 +1121,21 @@ def export_pdf(
     cell_style = ParagraphStyle('ArabicCell', fontName=ARABIC_FONT_NAME, alignment=1, fontSize=8, leading=10)
     header_style = ParagraphStyle('ArabicHeader', fontName=ARABIC_FONT_NAME, alignment=1, fontSize=9, leading=11, textColor=colors.whitesmoke)
 
-    title_text = ar_text("تقرير المحاضر والمخالفات - المنظومة السيادية المؤمنة")
-    story.append(Paragraph(title_text, title_style))
+    story.append(Paragraph(ar_text("تقرير المحاضر والمخالفات - المنظومة السيادية المؤمنة"), title_style))
     story.append(Spacer(1, 15))
 
     raw_headers = ["حالة التنفيذ", "السنة", "رقم القرار", "العنوان", "اسم المخالف", "رقم المحضر", "كود المتغير", "#"]
     headers = [Paragraph(ar_text(h), header_style) for h in raw_headers]
-
     table_data = [headers]
 
     for idx, (r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype) in enumerate(results, 1):
         address_text = (r_loc.FullAddress if r_loc and r_loc.FullAddress else (r_off.OffenderAddress if r_off else '-'))
         row = [
-            Paragraph(ar_text(r_exec.ExecutionStatusName if r_exec and r_exec.ExecutionStatusName else 'تنفيذ جزئي'), cell_style),
-            Paragraph(ar_text(_fmt_num_or_str(r_case.year if r_case else None) or '-'), cell_style),
+            Paragraph(ar_text(r_exec.ExecutionStatusName if r_exec else 'تنفيذ جزئي'), cell_style),
+            Paragraph(ar_text(str(r_case.year) if r_case and r_case.year else '-'), cell_style),
             Paragraph(ar_text(r_case.DecisionNumber or '-'), cell_style),
             Paragraph(ar_text(address_text), cell_style),
-            Paragraph(ar_text(r_off.OffenderName if r_off and r_off.OffenderName else 'غير مسجل'), cell_style),
+            Paragraph(ar_text(r_off.OffenderName if r_off else 'غير مسجل'), cell_style),
             Paragraph(ar_text(r_case.CaseNumber or '-'), cell_style),
             Paragraph(ar_text(r_case.VariableCode or '-'), cell_style),
             Paragraph(ar_text(str(idx)), cell_style)
@@ -1274,23 +1184,21 @@ def export_kml(
         national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
         v_type=v_type, status=status, district=district, vtype=vtype, year=year
     )
-    results = hydrate_cases_rows(db, query.yield_per(500).all())
+    results = query.yield_per(500).all()
     kml_items = []
     for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
         if r_case.Latitude and r_case.Longitude:
             try:
                 lat_val, lon_val = float(r_case.Latitude), float(r_case.Longitude)
-                if math.isnan(lat_val) or math.isnan(lon_val):
-                    continue
                 name = f"مخالفة: {r_off.OffenderName if r_off and r_off.OffenderName else 'غير مسجل'} - محضر: {r_case.CaseNumber or '-'}"
                 kml_items.append(f"""<Placemark><name><![CDATA[{name}]]></name><Point><coordinates>{lon_val},{lat_val},0</coordinates></Point></Placemark>""")
-            except: continue
+            except Exception:
+                continue
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>مخالفات المنظومة السيادية</name>{''.join(kml_items)}</Document></kml>"""
     response = Response(content=kml_content, media_type="application/vnd.google-earth.kml+xml")
     response.headers["Content-Disposition"] = f"attachment; filename=Sovereign_Violations_{datetime.now().strftime('%Y-%m-%d')}.kml"
     return response
 
-# --- الواجهة الأمامية الشاملة (محلية عبر /static + جاهزة للشبكة المحلية والسحابة) ---
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     return """
@@ -1315,8 +1223,7 @@ def serve_dashboard():
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans antialiased select-text" x-data="appData()">
 
-    <!-- شاشة تسجيل الدخول السيادية -->
-    <div x-show="!isLoggedIn" class="fixed inset-0 bg-slate-950 z-50 flex items-center justify-center p-4">
+    <div x-show="!isLoggedIn" x-cloak class="fixed inset-0 bg-slate-950 z-50 flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-700 w-full max-w-md p-8 rounded-3xl shadow-2xl space-y-6">
             <div class="text-center space-y-2">
                 <div class="bg-blue-600/20 text-blue-400 w-16 h-16 mx-auto rounded-2xl flex items-center justify-center border border-blue-500/30 text-2xl"><i class="fa-solid fa-shield-halved"></i></div>
@@ -1326,19 +1233,18 @@ def serve_dashboard():
             <form @submit.prevent="login()" class="space-y-4">
                 <div>
                     <label class="block text-xs text-slate-400 mb-1">اسم المستخدم</label>
-                    <input type="text" x-model="loginForm.username" required autocomplete="off" placeholder="أدخل اسم المستخدم" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-blue-500">
+                    <input type="text" x-model="loginForm.username" required autocomplete="username" placeholder="أدخل اسم المستخدم" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-blue-500">
                 </div>
                 <div>
                     <label class="block text-xs text-slate-400 mb-1">كلمة المرور</label>
-                    <input type="password" x-model="loginForm.password" required autocomplete="new-password" placeholder="••••••••" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-blue-500">
+                    <input type="password" x-model="loginForm.password" required autocomplete="current-password" placeholder="••••••••" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-blue-500">
                 </div>
-                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-bold text-sm shadow-lg transition cursor-pointer">مصادقة ودخول آمن</button>
+                <button type="submit" :disabled="isLoggingIn" class="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-3 rounded-xl font-bold text-sm shadow-lg transition cursor-pointer" x-text="isLoggingIn ? 'جاري التحقق والدخول...' : 'مصادقة ودخول آمن'"></button>
             </form>
             <div class="text-center text-xs text-slate-500 font-mono">حماية متطورة بنظام الرموز المشفرة (JWT)</div>
         </div>
     </div>
 
-    <!-- Header السيادي -->
     <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex flex-col lg:flex-row justify-between items-center gap-4 shadow-xl sticky top-0 z-40">
         <div class="flex items-center gap-3 w-full lg:w-auto justify-between lg:justify-start">
             <div class="flex items-center gap-3">
@@ -1380,7 +1286,6 @@ def serve_dashboard():
     </header>
 
     <main class="p-6 max-w-[1700px] mx-auto space-y-6">
-        <!-- الإحصائيات -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div class="bg-slate-800 p-4 rounded-2xl border border-slate-700 shadow-md flex items-center justify-between">
                 <div><p class="text-xs text-slate-400">إجمالي السجلات (PostgreSQL)</p><h3 class="text-2xl font-black text-blue-400 mt-1" x-text="stats.total_cases ? stats.total_cases.toLocaleString() : '0'"></h3></div>
@@ -1400,7 +1305,6 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- الخريطة والرسوم البيانية -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow-xl lg:col-span-1 flex flex-col justify-between">
                 <div class="flex justify-between items-center mb-2">
@@ -1425,7 +1329,6 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- أدوات البحث المتقدم الشاملة (مع Debounce لضمان السرعة ومنع التهنيج) -->
         <div class="bg-slate-800 p-4 rounded-2xl border border-slate-700 space-y-4 shadow-md">
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div>
@@ -1497,7 +1400,6 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- جدول العرض الرئيسي -->
         <div class="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-xl">
             <div class="overflow-x-auto">
                 <table class="w-full text-right border-collapse">
@@ -1560,7 +1462,6 @@ def serve_dashboard():
         </div>
     </main>
 
-    <!-- Modal المحاضر الشامل بالتبويبات -->
     <div x-show="showModal" x-cloak class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4 overflow-hidden">
         <div class="bg-slate-800 border border-slate-700 w-full max-w-7xl h-[92vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col" @click.away="closeModal()">
 
@@ -1580,7 +1481,7 @@ def serve_dashboard():
                 <button @click="activeTab = 'execution'" :class="{'bg-blue-600 text-white shadow-lg': activeTab==='execution', 'bg-slate-800 text-slate-300 hover:bg-slate-700': activeTab!=='execution'}" class="py-2 px-2 rounded-xl text-xs font-bold transition cursor-pointer truncate">التنفيذ</button>
                 <button @click="activeTab = 'judgements'" :class="{'bg-blue-600 text-white shadow-lg': activeTab==='judgements', 'bg-slate-800 text-slate-300 hover:bg-slate-700': activeTab!=='judgements'}" class="py-2 px-2 rounded-xl text-xs font-bold transition cursor-pointer truncate">تنفيذ الأحكام</button>
                 <button @click="activeTab = 'reconciliation'" :class="{'bg-blue-600 text-white shadow-lg': activeTab==='reconciliation', 'bg-slate-800 text-slate-300 hover:bg-slate-700': activeTab!=='reconciliation'}" class="py-2 px-2 rounded-xl text-xs font-bold transition cursor-pointer truncate">التصالح</button>
-                <button @click="activeTab = 'archive'" :class="{'bg-blue-600 text-white shadow-lg': activeTab==='archive', 'bg-slate-800 text-slate-300 hover:bg-slate-700': activeTab!=='archive'}" class="py-2 px-2 rounded-xl text-xs font-bold transition cursor-pointer truncate">الأرشيف الفعلي 📂</button>
+                <button @click="activeTab = 'archive'" :class="{'bg-blue-600 text-white shadow-lg': activeTab==='archive', 'bg-slate-800 text-slate-300 hover:bg-slate-700': activeTab!=='archive'}" class="py-2 px-2 rounded-xl text-xs font-bold transition cursor-pointer truncate">الأرشيف السحابي 📂</button>
             </div>
 
             <div class="p-4 sm:p-6 overflow-y-auto flex-1 space-y-6">
@@ -1706,7 +1607,7 @@ def serve_dashboard():
                     <div class="bg-slate-900 p-4 sm:p-6 rounded-2xl border border-slate-700 text-center space-y-4">
                         <div class="flex justify-between items-center border-b border-slate-800 pb-3 flex-wrap gap-2">
                             <span class="text-sm font-bold text-amber-400 flex items-center gap-2">
-                                <i class="fa-solid fa-box-archive"></i> الأرشيف الفعلي (مجلد D:\\Archive_Violations)
+                                <i class="fa-solid fa-box-archive"></i> الأرشيف السحابي متعدد الأجهزة
                             </span>
                             <span class="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-300"
                                   x-text="'المستند ' + (archiveList.length > 0 && !archiveList[0].includes('لا توجد') ? archiveIndex + 1 : 0) + ' من ' + (archiveList[0] && archiveList[0].includes('لا توجد') ? 0 : archiveList.length)">
@@ -1716,16 +1617,16 @@ def serve_dashboard():
                         <div class="min-h-[420px] bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-center relative overflow-auto p-2">
                             <template x-if="archiveList.length > 0 && !archiveList[archiveIndex].includes('لا توجد')">
                                 <div class="text-center space-y-3 w-full h-full flex flex-col items-center justify-center">
-                                    <template x-if="archiveList[archiveIndex].match(/\\.(jpg|jpeg|png|gif)$/i)">
+                                    <template x-if="archiveList[archiveIndex].match(/\.(jpg|jpeg|png|gif|webp)$/i)">
                                         <div class="w-full flex justify-center items-center overflow-auto">
                                             <img :src="('/api/archive/file/' + archiveList[archiveIndex])"
                                                  class="max-h-[450px] w-auto max-w-full rounded-xl border border-slate-700 object-contain shadow-2xl transition-all duration-300">
                                         </div>
                                     </template>
-                                    <template x-if="!archiveList[archiveIndex].match(/\\.(jpg|jpeg|png|gif)$/i)">
+                                    <template x-if="!archiveList[archiveIndex].match(/\.(jpg|jpeg|png|gif|webp)$/i)">
                                         <div class="py-12 space-y-3">
                                             <i class="fa-solid fa-file-pdf text-6xl text-rose-500"></i>
-                                            <div class="text-sm text-slate-300 font-bold">ملف مستند PDF</div>
+                                            <div class="text-sm text-slate-300 font-bold">ملف مستند PDF / أرشيف</div>
                                         </div>
                                     </template>
 
@@ -1733,7 +1634,7 @@ def serve_dashboard():
 
                                     <div class="flex gap-2 flex-wrap justify-center pt-1">
                                         <button @click="openOffenderFolder()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow cursor-pointer flex items-center gap-1.5">
-                                            <i class="fa-solid fa-folder-open"></i> فتح المجلد بالويندوز (D:)
+                                            <i class="fa-solid fa-folder-open"></i> حالة مجلد الأرشيف
                                         </button>
                                         <a :href="('/api/archive/file/' + archiveList[archiveIndex])" target="_blank" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow flex items-center gap-1.5">
                                             <i class="fa-solid fa-up-right-and-down-left-from-center"></i> عرض بحجم كامل / طباعة
@@ -1750,7 +1651,7 @@ def serve_dashboard():
                                     <i class="fa-solid fa-folder-open text-5xl text-slate-600 block"></i>
                                     <div>لا توجد مستندات مطابقة لهذا السجل حالياً</div>
                                     <button @click="openOffenderFolder()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow cursor-pointer inline-flex items-center gap-2">
-                                        <i class="fa-solid fa-folder-open"></i> فتح مجلد المخالف على القرص D
+                                        <i class="fa-solid fa-folder-open"></i> تفاصيل مسار الأرشيف
                                     </button>
                                 </div>
                             </template>
@@ -1764,11 +1665,11 @@ def serve_dashboard():
                                 التالي <i class="fa-solid fa-chevron-left"></i>
                             </button>
                             <label class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer shadow flex items-center gap-1.5">
-                                <i class="fa-solid fa-upload"></i> رفع ملف جديد
-                                <input type="file" @change="uploadArchiveFile($event)" class="hidden">
+                                <i class="fa-solid fa-upload"></i> رفع ملف / مسح ضوئي
+                                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp" @change="uploadArchiveFile($event)" class="hidden">
                             </label>
                             <button @click="scanArchiveDocument()" class="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer shadow flex items-center gap-1.5">
-                                <i class="fa-solid fa-print"></i> مسح ضوئي مباشر (Scanner)
+                                <i class="fa-solid fa-cloud-arrow-up"></i> أرشفة سحابية
                             </button>
                         </div>
                     </div>
@@ -1789,7 +1690,6 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Modal النسخة الاحتياطية -->
     <div x-show="showBackupModal" x-cloak class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div class="bg-slate-800 border border-slate-700 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden" @click.away="showBackupModal = false">
             <div class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
@@ -1805,7 +1705,7 @@ def serve_dashboard():
                     <button @click="generateBackup()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow transition cursor-pointer">توليد نسخة الآن 💾</button>
                 </div>
                 <div class="space-y-3">
-                    <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider">النسخ الاحتياطية المتوفرة على القرص</h4>
+                    <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider">النسخ الاحتياطية المتوفرة على الخادم</h4>
                     <div class="bg-slate-900 border border-slate-700 rounded-2xl max-h-60 overflow-y-auto divide-y divide-slate-800">
                         <template x-for="b in backupsList" :key="b.filename">
                             <div class="p-4 flex items-center justify-between hover:bg-slate-800/50">
@@ -1825,7 +1725,6 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Modal إدارة المستخدمين -->
     <div x-show="showUsersModal" x-cloak class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
         <div class="bg-slate-800 border border-slate-700 w-full max-w-5xl rounded-3xl shadow-2xl overflow-hidden my-4" @click.away="showUsersModal = false">
             <div class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
@@ -1897,7 +1796,6 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Modal سجل التدقيق الأمني -->
     <div x-show="showAuditModal" x-cloak class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
         <div class="bg-slate-800 border border-slate-700 w-full max-w-6xl rounded-3xl shadow-2xl overflow-hidden my-4" @click.away="showAuditModal = false">
             <div class="bg-slate-800 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
@@ -1956,11 +1854,10 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Frontend AlpineJS Script (مع التصدير الذكي الآمن عبر Fetch ودعم العمل المحلي بدون نت والسحابة) -->
     <script>
         function appData() {
             return {
-                isLoggedIn: false, currentUser: '', currentRole: '', authToken: '',
+                isLoggedIn: false, isLoggingIn: false, currentUser: '', currentRole: '', authToken: '',
                 loginForm: { username: '', password: '' },
                 tableData: [], stats: {}, currentPage: 1, totalPages: 1, totalRecords: 0,
                 searchQuery: '', searchVarCode: '', searchCaseNo: '', searchDecisionNo: '', searchNationalID: '', searchLat: '', searchLon: '', searchOffender: '', searchAddress: '',
@@ -2006,21 +1903,37 @@ def serve_dashboard():
                     return params.toString();
                 },
                 async login() {
+                    if (this.isLoggingIn) return;
+                    this.isLoggingIn = true;
                     try {
                         let res = await fetch('/api/auth/login', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(this.loginForm)
+                            body: JSON.stringify({
+                                username: (this.loginForm.username || '').trim(),
+                                password: this.loginForm.password || ''
+                            })
                         });
                         let data = await res.json();
-                        if (res.ok) {
-                            this.isLoggedIn = true;
+                        if (res.ok && data.access_token) {
                             this.authToken = data.access_token;
-                            this.currentUser = data.username;
-                            this.currentRole = data.role;
-                            this.initMap(); this.loadStats(); this.loadData(1);
-                        } else { alert(data.detail || "فشل المصادقة الأمنية"); }
-                    } catch(e) { alert("خطأ في الاتصال بالخادم"); }
+                            this.currentUser = data.username || this.loginForm.username;
+                            this.currentRole = data.role || 'DataEntry';
+                            this.loginForm.password = '';
+                            this.isLoggedIn = true;
+                            this.$nextTick(() => {
+                                this.initMap();
+                                this.loadStats();
+                                this.loadData(1);
+                            });
+                        } else {
+                            alert(data.detail || "فشل المصادقة الأمنية");
+                        }
+                    } catch (e) {
+                        alert("خطأ في الاتصال بالخادم");
+                    } finally {
+                        this.isLoggingIn = false;
+                    }
                 },
                 logout() {
                     this.isLoggedIn = false;
@@ -2036,32 +1949,35 @@ def serve_dashboard():
                             headers: { 'Authorization': 'Bearer ' + this.authToken }
                         });
                         let data = await res.json();
-                        if (!res.ok) { alert(data.detail || "تعذر فتح مجلد الأرشيف"); }
-                    } catch(e) { alert("خطأ في الاتصال بالخادم"); }
+                        if (res.ok && data.message) { alert(data.message); }
+                        else if (!res.ok) { alert(data.detail || "تعذر فتح مجلد الأرشيف"); }
+                    } catch (e) { alert("خطأ في الاتصال بالخادم"); }
                 },
                 async scanArchiveDocument() {
-                    if(!this.currentCaseId) { alert("يجب حفظ السجل أو فتحه أولاً قبل إجراء المسح الضوئي"); return; }
+                    if (!this.currentCaseId) { alert("يجب حفظ السجل أو فتحه أولاً قبل إجراء المسح الضوئي"); return; }
                     try {
                         let res = await fetch(`/api/cases/${this.currentCaseId}/archive/scan`, {
                             method: 'POST',
                             headers: { 'Authorization': 'Bearer ' + this.authToken }
                         });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             alert("✔ " + data.message);
                             this.loadCaseArchive(this.currentCaseId);
+                        } else if (res.ok && data.message) {
+                            alert(data.message);
                         } else { alert(data.detail || data.message || "فشل إجراء المسح الضوئي"); }
-                    } catch(e) { alert("حدث خطأ أثناء الاتصال بالماسح الضوئي"); }
+                    } catch (e) { alert("حدث خطأ أثناء الاتصال بالخادم"); }
                 },
                 async openBackupModal() {
                     try {
                         let res = await fetch('/api/admin/backups', { headers: { 'Authorization': 'Bearer ' + this.authToken } });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             this.backupsList = data.backups;
                             this.showBackupModal = true;
                         } else { alert(data.detail || "غير مسموح"); }
-                    } catch(e) { alert("تعذر جلب قائمة النسخ الاحتياطية"); }
+                    } catch (e) { alert("تعذر جلب قائمة النسخ الاحتياطية"); }
                 },
                 async generateBackup() {
                     try {
@@ -2070,22 +1986,22 @@ def serve_dashboard():
                             headers: { 'Authorization': 'Bearer ' + this.authToken }
                         });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             alert("✔ " + data.message);
                             this.openBackupModal();
                         } else { alert(data.detail || "فشل إنشاء النسخة الاحتياطية"); }
-                    } catch(e) { alert("خطأ في الاتصال"); }
+                    } catch (e) { alert("خطأ في الاتصال"); }
                 },
                 async openUsersModal() {
                     try {
                         let res = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + this.authToken } });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             this.usersList = data.data;
                             this.resetUserForm();
                             this.showUsersModal = true;
                         } else { alert(data.detail || "غير مسموح"); }
-                    } catch(e) { alert("تعذر جلب قائمة المستخدمين"); }
+                    } catch (e) { alert("تعذر جلب قائمة المستخدمين"); }
                 },
                 resetUserForm() {
                     this.userEditMode = false;
@@ -2107,40 +2023,40 @@ def serve_dashboard():
                             body: JSON.stringify(this.userForm)
                         });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             alert("✔ " + data.message);
                             this.openUsersModal();
                         } else { alert(data.detail || data.message || "خطأ في الصلاحيات"); }
-                    } catch(e) { alert("خطأ في حفظ بيانات المستخدم"); }
+                    } catch (e) { alert("خطأ في حفظ بيانات المستخدم"); }
                 },
                 async deleteUser(uid) {
-                    if(confirm("هل أنت متأكد من حذف هذا المستخدم نهائياً؟")) {
+                    if (confirm("هل أنت متأكد من حذف هذا المستخدم نهائياً؟")) {
                         try {
                             let res = await fetch(`/api/admin/users/${uid}`, {
                                 method: 'DELETE',
                                 headers: { 'Authorization': 'Bearer ' + this.authToken }
                             });
                             let data = await res.json();
-                            if(res.ok && data.status === 'success') {
+                            if (res.ok && data.status === 'success') {
                                 alert("✔ " + data.message);
                                 this.openUsersModal();
                             } else { alert(data.detail || "تعذر الحذف"); }
-                        } catch(e) { alert("خطأ أثناء الحذف"); }
+                        } catch (e) { alert("خطأ أثناء الحذف"); }
                     }
                 },
                 async openAuditModal() {
                     try {
                         let res = await fetch('/api/users/stats', { headers: { 'Authorization': 'Bearer ' + this.authToken } });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             this.auditSummary = data.summary;
                             this.auditLogs = data.logs;
                             this.showAuditModal = true;
                         } else { alert(data.detail || "غير مسموح"); }
-                    } catch(e) { alert("تعذر جلب سجل التدقيق"); }
+                    } catch (e) { alert("تعذر جلب سجل التدقيق"); }
                 },
                 initMap() {
-                    if(this.map || typeof L === 'undefined') return;
+                    if (this.map || typeof L === 'undefined') return;
                     try {
                         this.map = L.map('map').setView([26.8206, 30.8025], 6);
                         this.satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri' });
@@ -2153,7 +2069,7 @@ def serve_dashboard():
                         window.addEventListener('online', () => { this.mapOfflineNotice = false; });
                         this.satelliteLayer.addTo(this.map);
                         this.markersGroup = L.layerGroup().addTo(this.map);
-                    } catch(e) {
+                    } catch (e) {
                         this.mapOfflineNotice = true;
                     }
                 },
@@ -2247,6 +2163,7 @@ def serve_dashboard():
                 async loadStats() {
                     try {
                         let res = await fetch('/api/stats', { headers: { 'Authorization': 'Bearer ' + this.authToken } });
+                        if (res.status === 401) { this.logout(); return; }
                         let data = await res.json();
                         if (res.ok && data.status === 'success') { this.stats = data; this.updateChart(data.status_breakdown); }
                     } catch (e) { console.error(e); }
@@ -2260,6 +2177,7 @@ def serve_dashboard():
                         let joiner = qs ? '&' : '';
                         let url = `/api/cases/search?${qs}${joiner}page=${this.currentPage}&limit=50`;
                         let res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + this.authToken } });
+                        if (res.status === 401) { this.logout(); return; }
                         let data = await res.json();
                         if (res.ok && data.status === 'success') {
                             this.tableData = data.data;
@@ -2268,7 +2186,7 @@ def serve_dashboard():
                             this.updateMapMarkers();
                         }
                     } catch (e) { console.error(e); }
-                    finally { this.loading = false; setTimeout(() => { if(this.map) this.map.invalidateSize(); }, 200); }
+                    finally { this.loading = false; setTimeout(() => { if (this.map) this.map.invalidateSize(); }, 200); }
                 },
                 async loadCaseArchive(caseId) {
                     try {
@@ -2276,11 +2194,11 @@ def serve_dashboard():
                             headers: { 'Authorization': 'Bearer ' + this.authToken }
                         });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
+                        if (res.ok && data.status === 'success') {
                             this.archiveList = data.files.length > 0 ? data.files : ['لا توجد مستندات مطابقة لهذا السجل'];
                             this.archiveIndex = 0;
                         }
-                    } catch(e) {
+                    } catch (e) {
                         this.archiveList = ['خطأ في جلب الأرشيف'];
                     }
                 },
@@ -2296,25 +2214,26 @@ def serve_dashboard():
                             body: formData
                         });
                         let data = await res.json();
-                        if(res.ok && data.status === 'success') {
-                            alert("✔ تم رفع وتخزين المستند بنجاح داخل مجلد المخالف!");
+                        if (res.ok && data.status === 'success') {
+                            alert("✔ تم رفع وتخزين المستند بنجاح داخل أرشيف السجل!");
                             this.loadCaseArchive(this.currentCaseId);
                         } else { alert(data.detail || "فشل رفع الملف"); }
-                    } catch(e) { alert("خطأ في الاتصال"); }
+                    } catch (e) { alert("خطأ في الاتصال"); }
+                    finally { event.target.value = ''; }
                 },
                 async deleteArchiveFile(filename) {
-                    if(confirm(`هل أنت متأكد من حذف المستند (${filename}) نهائياً من القرص؟`)) {
+                    if (confirm(`هل أنت متأكد من حذف المستند (${filename}) نهائياً من الأرشيف؟`)) {
                         try {
                             let res = await fetch(`/api/archive/file/${filename}`, {
                                 method: 'DELETE',
                                 headers: { 'Authorization': 'Bearer ' + this.authToken }
                             });
                             let data = await res.json();
-                            if(res.ok && data.status === 'success') {
+                            if (res.ok && data.status === 'success') {
                                 alert("✔ " + data.message);
-                                if(this.currentCaseId) this.loadCaseArchive(this.currentCaseId);
+                                if (this.currentCaseId) this.loadCaseArchive(this.currentCaseId);
                             } else { alert(data.detail || "تعذر الحذف"); }
-                        } catch(e) { alert("خطأ في الاتصال"); }
+                        } catch (e) { alert("خطأ في الاتصال"); }
                     }
                 },
                 async openModal() {
@@ -2323,7 +2242,7 @@ def serve_dashboard():
                         let res = await fetch('/api/next-serial', { headers: { 'Authorization': 'Bearer ' + this.authToken } });
                         let data = await res.json();
                         this.form.SerialNo = data.next_serial;
-                    } catch(e) { this.form.SerialNo = 1; }
+                    } catch (e) { this.form.SerialNo = 1; }
 
                     this.form.VariableCode = ''; this.form.VariableDate = ''; this.form.CaseNumber = ''; this.form.CaseDate = ''; this.form.year = new Date().getFullYear(); this.form.StopNumber = ''; this.form.AdminNumber = ''; this.form.DecisionNumber = ''; this.form.DecisionDate = ''; this.form.AreaSize = null; this.form.Notes = ''; this.form.Latitude = ''; this.form.Longitude = '';
                     this.form.OffenderName = ''; this.form.OffenderNationalID = null; this.form.OffenderAddress = ''; this.form.Phone = null; this.form.OffenderNotes = '';
@@ -2426,7 +2345,7 @@ def serve_dashboard():
                             if (res.ok && result.status === 'success') {
                                 this.loadData(this.currentPage); this.loadStats(); alert(result.message);
                             } else { alert(result.detail || "تعذر الحذف"); }
-                        } catch(e) { alert("خطأ في الاتصال"); }
+                        } catch (e) { alert("خطأ في الاتصال"); }
                     }
                 },
                 async downloadFileSecurely(endpoint, filename) {
@@ -2440,7 +2359,7 @@ def serve_dashboard():
                         });
                         if (!res.ok) {
                             let errData = null;
-                            try { errData = await res.json(); } catch(_) {}
+                            try { errData = await res.json(); } catch (_) {}
                             alert((errData && errData.detail) || "فشل عملية التصدير، تأكد من الصلاحيات أو البيانات");
                             return;
                         }
@@ -2453,7 +2372,7 @@ def serve_dashboard():
                         link.click();
                         document.body.removeChild(link);
                         setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 1500);
-                    } catch(e) {
+                    } catch (e) {
                         alert("حدث خطأ أثناء تنزيل الملف");
                     } finally {
                         this.isExporting = false;
@@ -2585,4 +2504,5 @@ def serve_dashboard():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
