@@ -562,67 +562,109 @@ def search_cases(
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
+    from sqlalchemy import or_
+
+    g = globals()
+    sub_names = [
+        "Offender",
+        "Location",
+        "ExecutionStatus",
+        "Judgement",
+        "Reconciliation",
+        "ViolationType",
+        "Archive",
+    ]
+    active_subs = [
+        (name, g[name])
+        for name in sub_names
+        if name in g and g[name] is not None and hasattr(g[name], "CaseID")
+    ]
+
     try:
-        query = (
-            db.query(Case, Offender, Location, ExecutionStatus)
-            .outerjoin(Offender, Case.OffenderID == Offender.OffenderID)
-            .outerjoin(Location, Case.LocationID == Location.LocationID)
-            .outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)
-        )
+        query = db.query(Case, *[m for _, m in active_subs])
+
+        for _, sub_model in active_subs:
+            query = query.outerjoin(sub_model, Case.CaseID == sub_model.CaseID)
+
+        def add_ilike(conds, model, col_name, pattern):
+            if model is not None and hasattr(model, col_name):
+                conds.append(getattr(model, col_name).ilike(pattern))
+
+        sub_map = dict(active_subs)
+        m_off = sub_map.get("Offender")
+        m_loc = sub_map.get("Location")
+        m_exec = sub_map.get("ExecutionStatus")
+        m_vtype = sub_map.get("ViolationType")
 
         if q and q.strip():
             term = f"%{q.strip()}%"
-            query = query.filter(
-                (Case.VariableCode.ilike(term))
-                | (Case.CaseNumber.ilike(term))
-                | (Case.DecisionNumber.ilike(term))
-                | (Case.NationalID.ilike(term))
-                | (Offender.OffenderName.ilike(term))
-                | (Location.StreetName.ilike(term))
-                | (Location.DistrictName.ilike(term))
-                | (ExecutionStatus.procedure.ilike(term))
-            )
+            q_conds = []
+            add_ilike(q_conds, Case, "VariableCode", term)
+            add_ilike(q_conds, Case, "CaseNumber", term)
+            add_ilike(q_conds, Case, "DecisionNumber", term)
+            add_ilike(q_conds, Case, "NationalID", term)
+            add_ilike(q_conds, m_off, "OffenderName", term)
+            add_ilike(q_conds, m_loc, "StreetName", term)
+            add_ilike(q_conds, m_loc, "DistrictName", term)
+            add_ilike(q_conds, m_exec, "procedure", term)
+            if q_conds:
+                query = query.filter(or_(*q_conds))
 
-        if var_code and var_code.strip():
+        if var_code and var_code.strip() and hasattr(Case, "VariableCode"):
             query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
 
-        if case_no and case_no.strip():
+        if case_no and case_no.strip() and hasattr(Case, "CaseNumber"):
             query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
 
-        if decision_no and decision_no.strip():
+        if decision_no and decision_no.strip() and hasattr(Case, "DecisionNumber"):
             query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
 
         if national_id and national_id.strip():
             term_nid = f"%{national_id.strip()}%"
-            query = query.filter(
-                (Case.NationalID.ilike(term_nid)) | (Offender.NationalID.ilike(term_nid))
-            )
+            nid_conds = []
+            add_ilike(nid_conds, Case, "NationalID", term_nid)
+            add_ilike(nid_conds, m_off, "NationalID", term_nid)
+            if nid_conds:
+                query = query.filter(or_(*nid_conds))
 
-        if offender and offender.strip():
-            query = query.filter(Offender.OffenderName.ilike(f"%{offender.strip()}%"))
+        if offender and offender.strip() and m_off is not None and hasattr(m_off, "OffenderName"):
+            query = query.filter(m_off.OffenderName.ilike(f"%{offender.strip()}%"))
 
-        if address and address.strip():
+        if address and address.strip() and m_loc is not None:
             term_addr = f"%{address.strip()}%"
-            query = query.filter(
-                (Location.StreetName.ilike(term_addr)) | (Location.DistrictName.ilike(term_addr))
-            )
+            addr_conds = []
+            add_ilike(addr_conds, m_loc, "StreetName", term_addr)
+            add_ilike(addr_conds, m_loc, "DistrictName", term_addr)
+            if addr_conds:
+                query = query.filter(or_(*addr_conds))
 
-        if district and district.strip():
-            query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
+        if district and district.strip() and m_loc is not None and hasattr(m_loc, "DistrictName"):
+            query = query.filter(m_loc.DistrictName.ilike(f"%{district.strip()}%"))
 
         status_val = (status or "").strip()
-        if status_val:
-            query = query.filter(ExecutionStatus.procedure.ilike(f"%{status_val}%"))
+        if status_val and m_exec is not None and hasattr(m_exec, "procedure"):
+            query = query.filter(m_exec.procedure.ilike(f"%{status_val}%"))
 
-        if year is not None:
+        vtype_val = (vtype or v_type or "").strip()
+        if vtype_val and m_vtype is not None and hasattr(m_vtype, "ViolationTypeName"):
+            query = query.filter(m_vtype.ViolationTypeName.ilike(f"%{vtype_val}%"))
+
+        if lat and lat.strip() and hasattr(Case, "Latitude"):
+            query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
+
+        if lon and lon.strip() and hasattr(Case, "Longitude"):
+            query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
+
+        if year is not None and hasattr(Case, "year"):
             query = query.filter(Case.year == str(year))
 
-        query = query.order_by(Case.CaseID.desc())
+        if hasattr(Case, "CaseID"):
+            query = query.order_by(Case.CaseID.desc())
 
         total_count = query.count()
         results = query.offset((page - 1) * limit).limit(limit).all()
 
-        def _clean_id(val):
+        def clean_str(val):
             if val is None:
                 return ""
             s = str(val).strip()
@@ -636,73 +678,86 @@ def search_cases(
             except (ValueError, TypeError):
                 return s
 
-        data = []
-        for r_case, r_off, r_loc, r_exec in results:
-            off_name = (getattr(r_off, "OffenderName", None) if r_off else None) or "غير مسجل"
-            raw_nid = (getattr(r_off, "NationalID", None) if r_off else None) or getattr(r_case, "NationalID", None)
-            off_nid = _clean_id(raw_nid)
-            phone_str = _clean_id(getattr(r_off, "Phone", None) if r_off else None)
+        def attr(obj, name, default=None):
+            return getattr(obj, name, default) if obj is not None else default
 
-            street = (getattr(r_loc, "StreetName", None) if r_loc else None) or ""
-            dist = (getattr(r_loc, "DistrictName", None) if r_loc else None) or ""
-            full_addr = (getattr(r_loc, "FullAddress", None) if r_loc else None) or (
+        data = []
+        for row in results:
+            if isinstance(row, (tuple, list)):
+                r_case = row[0]
+                linked = {name: row[i + 1] for i, (name, _) in enumerate(active_subs)}
+            else:
+                r_case = row
+                linked = {}
+
+            r_off = linked.get("Offender")
+            r_loc = linked.get("Location")
+            r_exec = linked.get("ExecutionStatus")
+            r_judg = linked.get("Judgement")
+            r_recon = linked.get("Reconciliation")
+            r_vtype = linked.get("ViolationType")
+
+            off_name = attr(r_off, "OffenderName") or "غير مسجل"
+            raw_nid = attr(r_off, "NationalID") or attr(r_case, "NationalID")
+            off_nid = clean_str(raw_nid)
+            phone_str = clean_str(attr(r_off, "Phone"))
+
+            street = attr(r_loc, "StreetName", "") or ""
+            dist = attr(r_loc, "DistrictName", "") or ""
+            full_addr = attr(r_loc, "FullAddress", "") or (
                 f"{street} - {dist}".strip(" -") if (street or dist) else ""
             )
 
-            proc_val = (getattr(r_exec, "procedure", None) if r_exec else None) or ""
-            exec_status_name = (
-                (getattr(r_exec, "ExecutionStatusName", None) if r_exec else None)
-                or proc_val
-                or "تنفيذ جزئي"
-            )
+            proc_val = attr(r_exec, "procedure", "") or ""
+            exec_status_name = attr(r_exec, "ExecutionStatusName") or proc_val or "تنفيذ جزئي"
 
             data.append({
-                "CaseID": getattr(r_case, "CaseID", None),
-                "SerialNo": getattr(r_case, "SerialNo", "") or "",
-                "VariableCode": getattr(r_case, "VariableCode", "-") or "-",
-                "VariableDate": getattr(r_case, "VariableDate", "") or "",
-                "CaseNumber": getattr(r_case, "CaseNumber", "-") or "-",
-                "CaseDate": getattr(r_case, "CaseDate", "") or "",
-                "DecisionNumber": getattr(r_case, "DecisionNumber", "-") or "-",
-                "DecisionDate": getattr(r_case, "DecisionDate", "") or "",
-                "year": getattr(r_case, "year", "") or "",
-                "StopNumber": getattr(r_case, "StopNumber", "") or "",
-                "AdminNumber": getattr(r_case, "AdminNumber", "") or "",
-                "AreaSize": getattr(r_case, "AreaSize", 0.0) or 0.0,
-                "Notes": getattr(r_case, "Notes", "") or "",
-                "Latitude": getattr(r_case, "Latitude", "") or "",
-                "Longitude": getattr(r_case, "Longitude", "") or "",
+                "CaseID": attr(r_case, "CaseID"),
+                "SerialNo": attr(r_case, "SerialNo", "") or "",
+                "VariableCode": attr(r_case, "VariableCode", "-") or "-",
+                "VariableDate": attr(r_case, "VariableDate", "") or "",
+                "CaseNumber": attr(r_case, "CaseNumber", "-") or "-",
+                "CaseDate": attr(r_case, "CaseDate", "") or "",
+                "DecisionNumber": attr(r_case, "DecisionNumber", "-") or "-",
+                "DecisionDate": attr(r_case, "DecisionDate", "") or "",
+                "year": attr(r_case, "year", "") or "",
+                "StopNumber": attr(r_case, "StopNumber", "") or "",
+                "AdminNumber": attr(r_case, "AdminNumber", "") or "",
+                "AreaSize": attr(r_case, "AreaSize", 0.0) or 0.0,
+                "Notes": attr(r_case, "Notes", "") or "",
+                "Latitude": attr(r_case, "Latitude", "") or "",
+                "Longitude": attr(r_case, "Longitude", "") or "",
                 "OffenderName": off_name,
                 "OffenderNationalID": off_nid,
-                "OffenderAddress": (getattr(r_off, "OffenderAddress", None) if r_off else None) or "",
+                "OffenderAddress": attr(r_off, "OffenderAddress", "") or "",
                 "Phone": phone_str,
-                "OffenderNotes": (getattr(r_off, "Notes", None) if r_off else None) or "",
+                "OffenderNotes": attr(r_off, "Notes", "") or "",
                 "StreetName": street,
                 "DistrictName": dist,
                 "FullAddress": full_addr,
-                "Landmark": (getattr(r_loc, "Landmark", None) if r_loc else None) or "",
+                "Landmark": attr(r_loc, "Landmark", "") or "",
                 "ExecutionStatusName": exec_status_name,
                 "procedure": proc_val,
-                "ExecutionLevel": (getattr(r_exec, "ExecutionLevel", None) if r_exec else None) or "",
-                "ExecNotes": (getattr(r_exec, "Notes", None) if r_exec else None) or "",
-                "HasAppeal": False,
-                "CourtDecision": "",
-                "CourtDecisionDate": None,
-                "DeputyGovernorDecision": None,
-                "DateDeputyGovernorDecision": None,
-                "FinalJudgement": None,
-                "FinalJudgementDate": None,
-                "TheFine": None,
-                "NonExecutionNumber": None,
-                "DepartmentIssueDate": None,
-                "FelonyNumber": None,
-                "JudgementNotes": "",
-                "ReconciliationNumber": "",
-                "ReconciliationDate": "",
-                "FineAmount": None,
-                "ReconNotes": "",
-                "ViolationTypeName": getattr(r_case, "ViolationTypeName", "") or "",
-                "ViolationDescription": ""
+                "ExecutionLevel": attr(r_exec, "ExecutionLevel", "") or "",
+                "ExecNotes": attr(r_exec, "Notes", "") or "",
+                "HasAppeal": bool(attr(r_judg, "HasAppeal", False)),
+                "CourtDecision": attr(r_judg, "CourtDecision", "") or "",
+                "CourtDecisionDate": attr(r_judg, "CourtDecisionDate", None),
+                "DeputyGovernorDecision": attr(r_judg, "DeputyGovernorDecision", None),
+                "DateDeputyGovernorDecision": attr(r_judg, "DateDeputyGovernorDecision", None),
+                "FinalJudgement": attr(r_judg, "FinalJudgement", None),
+                "FinalJudgementDate": attr(r_judg, "FinalJudgementDate", None),
+                "TheFine": attr(r_judg, "TheFine", None),
+                "NonExecutionNumber": attr(r_judg, "NonExecutionNumber", None),
+                "DepartmentIssueDate": attr(r_judg, "DepartmentIssueDate", None),
+                "FelonyNumber": attr(r_judg, "FelonyNumber", None),
+                "JudgementNotes": attr(r_judg, "Notes", "") or "",
+                "ReconciliationNumber": attr(r_recon, "ReconciliationNumber", "") or "",
+                "ReconciliationDate": attr(r_recon, "ReconciliationDate", "") or "",
+                "FineAmount": attr(r_recon, "FineAmount", None),
+                "ReconNotes": attr(r_recon, "Notes", "") or "",
+                "ViolationTypeName": attr(r_vtype, "ViolationTypeName", "") or attr(r_case, "ViolationTypeName", "") or "",
+                "ViolationDescription": attr(r_vtype, "ViolationDescription", "") or ""
             })
 
         return {
@@ -715,7 +770,7 @@ def search_cases(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في استعلام البحث: {str(e)}")
-
+        
 # --- مسارات الإضافة والتعديل والأرشيف والتصدير المحسّنة ---
 @app.post("/api/cases")
 def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
