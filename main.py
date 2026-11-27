@@ -562,7 +562,7 @@ def search_cases(
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
-    from sqlalchemy import or_
+    from sqlalchemy import cast, Integer, String, or_
 
     g = globals()
     sub_names = [
@@ -583,12 +583,14 @@ def search_cases(
     try:
         query = db.query(Case, *[m for _, m in active_subs])
 
+        pk_case = getattr(Case, "CaseID", None)
         for _, sub_model in active_subs:
-            query = query.outerjoin(sub_model, Case.CaseID == sub_model.CaseID)
-
-        def add_ilike(conds, model, col_name, pattern):
-            if model is not None and hasattr(model, col_name):
-                conds.append(getattr(model, col_name).ilike(pattern))
+            sub_case_col = getattr(sub_model, "CaseID", None)
+            if pk_case is not None and sub_case_col is not None:
+                query = query.outerjoin(
+                    sub_model,
+                    cast(pk_case, Integer) == cast(sub_case_col, Integer),
+                )
 
         sub_map = dict(active_subs)
         m_off = sub_map.get("Offender")
@@ -596,70 +598,107 @@ def search_cases(
         m_exec = sub_map.get("ExecutionStatus")
         m_vtype = sub_map.get("ViolationType")
 
+        def add_str_ilike(conds, model, col_name, text_val):
+            if model is None or not hasattr(model, col_name) or not text_val:
+                return
+            col = getattr(model, col_name)
+            if isinstance(getattr(col, "type", None), String):
+                conds.append(col.ilike(f"%{text_val}%"))
+
         if q and q.strip():
-            term = f"%{q.strip()}%"
+            q_val = q.strip()
             q_conds = []
-            add_ilike(q_conds, Case, "VariableCode", term)
-            add_ilike(q_conds, Case, "CaseNumber", term)
-            add_ilike(q_conds, Case, "DecisionNumber", term)
-            add_ilike(q_conds, Case, "NationalID", term)
-            add_ilike(q_conds, m_off, "OffenderName", term)
-            add_ilike(q_conds, m_loc, "StreetName", term)
-            add_ilike(q_conds, m_loc, "DistrictName", term)
-            add_ilike(q_conds, m_exec, "procedure", term)
+            add_str_ilike(q_conds, Case, "VariableCode", q_val)
+            add_str_ilike(q_conds, Case, "CaseNumber", q_val)
+            add_str_ilike(q_conds, Case, "DecisionNumber", q_val)
+            add_str_ilike(q_conds, Case, "NationalID", q_val)
+            add_str_ilike(q_conds, m_off, "OffenderName", q_val)
+            add_str_ilike(q_conds, m_off, "NationalID", q_val)
+            add_str_ilike(q_conds, m_loc, "StreetName", q_val)
+            add_str_ilike(q_conds, m_loc, "DistrictName", q_val)
+            add_str_ilike(q_conds, m_exec, "procedure", q_val)
+            if q_val.isdigit() and pk_case is not None:
+                q_conds.append(cast(pk_case, Integer) == int(q_val))
             if q_conds:
                 query = query.filter(or_(*q_conds))
 
-        if var_code and var_code.strip() and hasattr(Case, "VariableCode"):
-            query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
+        if var_code and var_code.strip():
+            f_list = []
+            add_str_ilike(f_list, Case, "VariableCode", var_code.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
-        if case_no and case_no.strip() and hasattr(Case, "CaseNumber"):
-            query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
+        if case_no and case_no.strip():
+            f_list = []
+            add_str_ilike(f_list, Case, "CaseNumber", case_no.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
-        if decision_no and decision_no.strip() and hasattr(Case, "DecisionNumber"):
-            query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
+        if decision_no and decision_no.strip():
+            f_list = []
+            add_str_ilike(f_list, Case, "DecisionNumber", decision_no.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
         if national_id and national_id.strip():
-            term_nid = f"%{national_id.strip()}%"
+            nid_val = national_id.strip()
             nid_conds = []
-            add_ilike(nid_conds, Case, "NationalID", term_nid)
-            add_ilike(nid_conds, m_off, "NationalID", term_nid)
+            add_str_ilike(nid_conds, Case, "NationalID", nid_val)
+            add_str_ilike(nid_conds, m_off, "NationalID", nid_val)
             if nid_conds:
                 query = query.filter(or_(*nid_conds))
 
-        if offender and offender.strip() and m_off is not None and hasattr(m_off, "OffenderName"):
-            query = query.filter(m_off.OffenderName.ilike(f"%{offender.strip()}%"))
+        if offender and offender.strip():
+            f_list = []
+            add_str_ilike(f_list, m_off, "OffenderName", offender.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
-        if address and address.strip() and m_loc is not None:
-            term_addr = f"%{address.strip()}%"
+        if address and address.strip():
+            addr_val = address.strip()
             addr_conds = []
-            add_ilike(addr_conds, m_loc, "StreetName", term_addr)
-            add_ilike(addr_conds, m_loc, "DistrictName", term_addr)
+            add_str_ilike(addr_conds, m_loc, "StreetName", addr_val)
+            add_str_ilike(addr_conds, m_loc, "DistrictName", addr_val)
             if addr_conds:
                 query = query.filter(or_(*addr_conds))
 
-        if district and district.strip() and m_loc is not None and hasattr(m_loc, "DistrictName"):
-            query = query.filter(m_loc.DistrictName.ilike(f"%{district.strip()}%"))
+        if district and district.strip():
+            f_list = []
+            add_str_ilike(f_list, m_loc, "DistrictName", district.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
         status_val = (status or "").strip()
-        if status_val and m_exec is not None and hasattr(m_exec, "procedure"):
-            query = query.filter(m_exec.procedure.ilike(f"%{status_val}%"))
+        if status_val:
+            f_list = []
+            add_str_ilike(f_list, m_exec, "procedure", status_val)
+            if f_list:
+                query = query.filter(f_list[0])
 
         vtype_val = (vtype or v_type or "").strip()
-        if vtype_val and m_vtype is not None and hasattr(m_vtype, "ViolationTypeName"):
-            query = query.filter(m_vtype.ViolationTypeName.ilike(f"%{vtype_val}%"))
+        if vtype_val:
+            f_list = []
+            add_str_ilike(f_list, m_vtype, "ViolationTypeName", vtype_val)
+            if f_list:
+                query = query.filter(f_list[0])
 
-        if lat and lat.strip() and hasattr(Case, "Latitude"):
-            query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
+        if lat and lat.strip():
+            f_list = []
+            add_str_ilike(f_list, Case, "Latitude", lat.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
-        if lon and lon.strip() and hasattr(Case, "Longitude"):
-            query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
+        if lon and lon.strip():
+            f_list = []
+            add_str_ilike(f_list, Case, "Longitude", lon.strip())
+            if f_list:
+                query = query.filter(f_list[0])
 
         if year is not None and hasattr(Case, "year"):
-            query = query.filter(Case.year == str(year))
+            query = query.filter(cast(Case.year, String) == str(year))
 
-        if hasattr(Case, "CaseID"):
-            query = query.order_by(Case.CaseID.desc())
+        if pk_case is not None:
+            query = query.order_by(cast(pk_case, Integer).desc())
 
         total_count = query.count()
         results = query.offset((page - 1) * limit).limit(limit).all()
