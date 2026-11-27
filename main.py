@@ -541,29 +541,6 @@ def download_backup(filename: str, token: Optional[str] = Query(None), db: Sessi
     raise HTTPException(status_code=404, detail="الملف غير موجود")
 
 # --- محرك البحث الفائق والمحسن ---
-def _safe_attr(obj, attr_name, default=None):
-    if obj is None:
-        return default
-    return getattr(obj, attr_name, default)
-
-
-def _safe_num_str(val):
-    if val is None:
-        return ""
-    s = str(val).strip()
-    if not s or s.lower() in ("none", "null", "nan"):
-        return ""
-    try:
-        num = float(s)
-        if math.isnan(num):
-            return ""
-        if num.is_integer():
-            return str(int(num))
-        return s
-    except (ValueError, TypeError):
-        return s
-
-
 @app.get("/api/cases/search")
 def search_cases(
     q: Optional[str] = "",
