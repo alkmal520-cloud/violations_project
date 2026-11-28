@@ -333,45 +333,22 @@ def build_filtered_cases_query(
     off_cols = _get_table_columns("tbl_offenders")
     loc_cols = _get_table_columns("tbl_locations")
     exec_cols = _get_table_columns("tbl_executionstatus")
-    judg_cols = _get_table_columns("tbl_judgements")
-    recon_cols = _get_table_columns("tbl_reconciliation")
     vtype_cols = _get_table_columns("tbl_violationtypes")
 
-    query = db.query(Case, Offender, Location, ExecutionStatus, Judgement, Reconciliation, ViolationType)
+    query = db.query(Case, Offender, Location, ExecutionStatus)
 
     if "OffenderID" in case_cols and "OffenderID" in off_cols:
         query = query.outerjoin(Offender, Case.OffenderID == Offender.OffenderID)
     elif "CaseID" in off_cols:
         query = query.outerjoin(Offender, Case.CaseID == Offender.CaseID)
-    else:
-        query = query.outerjoin(Offender, False)
 
     if "LocationID" in case_cols and "LocationID" in loc_cols:
         query = query.outerjoin(Location, Case.LocationID == Location.LocationID)
     elif "CaseID" in loc_cols:
         query = query.outerjoin(Location, Case.CaseID == Location.CaseID)
-    else:
-        query = query.outerjoin(Location, False)
 
     if "CaseID" in exec_cols:
         query = query.outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)
-    else:
-        query = query.outerjoin(ExecutionStatus, False)
-
-    if "CaseID" in judg_cols:
-        query = query.outerjoin(Judgement, Case.CaseID == Judgement.CaseID)
-    else:
-        query = query.outerjoin(Judgement, False)
-
-    if "CaseID" in recon_cols:
-        query = query.outerjoin(Reconciliation, Case.CaseID == Reconciliation.CaseID)
-    else:
-        query = query.outerjoin(Reconciliation, False)
-
-    if "CaseID" in vtype_cols:
-        query = query.outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
-    else:
-        query = query.outerjoin(ViolationType, False)
 
     if var_code and var_code.strip() and "VariableCode" in case_cols:
         query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
@@ -411,7 +388,8 @@ def build_filtered_cases_query(
             query = query.filter(or_(*addr_filters))
 
     effective_vtype = (v_type or vtype or "").strip()
-    if effective_vtype and "ViolationTypeName" in vtype_cols:
+    if effective_vtype and "CaseID" in vtype_cols and "ViolationTypeName" in vtype_cols:
+        query = query.outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
         query = query.filter(ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%"))
 
     if q and q.strip():
@@ -440,8 +418,6 @@ def build_filtered_cases_query(
             filters.append(Location.StreetName.ilike(search_filter))
         if "DistrictName" in loc_cols:
             filters.append(Location.DistrictName.ilike(search_filter))
-        if "ViolationTypeName" in vtype_cols:
-            filters.append(ViolationType.ViolationTypeName.ilike(search_filter))
         if filters:
             query = query.filter(or_(*filters))
 
@@ -462,68 +438,6 @@ def build_filtered_cases_query(
         query = query.filter(Case.year == str(year).strip())
 
     return query.order_by(Case.CaseID.desc())
-
-
-class LoginPayload(BaseModel):
-    username: str
-    password: str
-
-
-class UserPayload(BaseModel):
-    Username: str
-    Password: Optional[str] = ""
-    FullName: Optional[str] = ""
-    Role: Optional[str] = "DataEntry"
-    IsActive: Optional[bool] = True
-
-
-class CaseFullPayload(BaseModel):
-    SerialNo: Optional[str] = None
-    VariableCode: Optional[str] = ""
-    VariableDate: Optional[str] = ""
-    CaseNumber: Optional[str] = ""
-    CaseDate: Optional[str] = ""
-    year: Optional[str] = None
-    StopNumber: Optional[str] = ""
-    AdminNumber: Optional[str] = ""
-    DecisionNumber: Optional[str] = ""
-    DecisionDate: Optional[str] = ""
-    AreaSize: Optional[str] = None
-    Notes: Optional[str] = ""
-    Latitude: Optional[str] = ""
-    Longitude: Optional[str] = ""
-    OffenderName: Optional[str] = ""
-    OffenderNationalID: Optional[str] = None
-    OffenderAddress: Optional[str] = ""
-    Phone: Optional[str] = None
-    OffenderNotes: Optional[str] = ""
-    StreetName: Optional[str] = ""
-    DistrictName: Optional[str] = ""
-    FullAddress: Optional[str] = ""
-    Landmark: Optional[str] = ""
-    ExecutionStatusName: Optional[str] = "تنفيذ جزئي"
-    procedure: Optional[str] = ""
-    ExecutionLevel: Optional[str] = ""
-    ExecNotes: Optional[str] = ""
-    HasAppeal: Optional[bool] = False
-    CourtDecision: Optional[str] = ""
-    CourtDecisionDate: Optional[str] = None
-    DeputyGovernorDecision: Optional[str] = None
-    DateDeputyGovernorDecision: Optional[str] = None
-    FinalJudgement: Optional[str] = None
-    FinalJudgementDate: Optional[str] = None
-    TheFine: Optional[str] = None
-    NonExecutionNumber: Optional[str] = None
-    DepartmentIssueDate: Optional[str] = None
-    FelonyNumber: Optional[str] = None
-    JudgementNotes: Optional[str] = ""
-    ReconciliationNumber: Optional[str] = ""
-    ReconciliationDate: Optional[str] = ""
-    FineAmount: Optional[str] = None
-    ReconNotes: Optional[str] = ""
-    ViolationTypeName: Optional[str] = ""
-    ViolationDescription: Optional[str] = ""
-
 # --- مسارات المصادقة والمستخدمين ---
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, db: Session = Depends(get_db)):
