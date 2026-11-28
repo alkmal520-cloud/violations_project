@@ -620,7 +620,44 @@ def download_backup(filename: str, token: Optional[str] = Query(None), db: Sessi
         return FileResponse(file_path, filename=safe_name, media_type='application/json')
     raise HTTPException(status_code=404, detail="الملف غير موجود")
 
-# --- محرك البحث الفائق والمحسن ---
+def _safe_text(val, default=""):
+    if val is None:
+        return default
+    s = str(val).strip()
+    return default if s.lower() in ("", "none", "nan") else s
+
+
+def _safe_int_or_none(val):
+    if val is None or val == "":
+        return None
+    try:
+        if isinstance(val, float) and math.isnan(val):
+            return None
+        return int(float(str(val).strip()))
+    except Exception:
+        return None
+
+
+def _safe_float_or_none(val):
+    if val is None or val == "":
+        return None
+    try:
+        f = float(str(val).strip())
+        return None if math.isnan(f) else f
+    except Exception:
+        return None
+
+
+def _has_attr(obj, attr_name):
+    return obj is not None and hasattr(obj, attr_name)
+
+
+def _get_attr(obj, attr_name, default=None):
+    if obj is None or not hasattr(obj, attr_name):
+        return default
+    return getattr(obj, attr_name)
+
+
 @app.get("/api/cases/search")
 def search_cases(
     q: Optional[str] = "",
@@ -636,109 +673,273 @@ def search_cases(
     status: Optional[str] = "",
     district: Optional[str] = "",
     vtype: Optional[str] = "",
-    year: Optional[int] = None,
+    year: Optional[str] = None,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=500),
     user_data: dict = Depends(get_current_user_payload),
     db: Session = Depends(get_db)
 ):
-    query = build_filtered_cases_query(
-        db=db, q=q, var_code=var_code, case_no=case_no, decision_no=decision_no,
-        national_id=national_id, lat=lat, lon=lon, offender=offender, address=address,
-        v_type=v_type, status=status, district=district, vtype=vtype, year=year
-    )
+    try:
+        query = build_filtered_cases_query(
+            db=db,
+            q=q,
+            var_code=var_code,
+            case_no=case_no,
+            decision_no=decision_no,
+            national_id=national_id,
+            lat=lat,
+            lon=lon,
+            offender=offender,
+            address=address,
+            v_type=v_type,
+            status=status,
+            district=district,
+            vtype=vtype,
+            year=year,
+        )
 
-    total_count = query.count()
-    results = query.offset((page - 1) * limit).limit(limit).all()
+        total_count = query.count()
+        results = query.offset((page - 1) * limit).limit(limit).all()
 
-    data = []
-    for r_case, r_off, r_loc, r_exec, r_judg, r_recon, r_vtype in results:
-        data.append({
-            "CaseID": r_case.CaseID,
-            "SerialNo": r_case.SerialNo or "",
-            "VariableCode": r_case.VariableCode or "-",
-            "VariableDate": r_case.VariableDate or "",
-            "CaseNumber": r_case.CaseNumber or "-",
-            "CaseDate": r_case.CaseDate or "",
-            "DecisionNumber": r_case.DecisionNumber or "-",
-            "DecisionDate": r_case.DecisionDate or "",
-            "year": r_case.year or "",
-            "StopNumber": r_case.StopNumber or "",
-            "AdminNumber": r_case.AdminNumber or "",
-            "AreaSize": r_case.AreaSize or 0.0,
-            "Notes": r_case.Notes or "",
-            "Latitude": r_case.Latitude or "",
-            "Longitude": r_case.Longitude or "",
-            "OffenderName": r_off.OffenderName if r_off else "غير مسجل",
-            "OffenderNationalID": str(int(r_off.NationalID)) if r_off and r_off.NationalID and not math.isnan(r_off.NationalID) else "",
-            "OffenderAddress": r_off.OffenderAddress if r_off else "",
-            "Phone": str(int(r_off.Phone)) if r_off and r_off.Phone and not math.isnan(r_off.Phone) else "",
-            "OffenderNotes": r_off.Notes if r_off else "",
-            "StreetName": r_loc.StreetName if r_loc else "",
-            "DistrictName": r_loc.DistrictName if r_loc else "",
-            "FullAddress": r_loc.FullAddress if r_loc else "",
-            "Landmark": r_loc.Landmark if r_loc else "",
-            "ExecutionStatusName": r_exec.ExecutionStatusName if r_exec else "تنفيذ جزئي",
-            "procedure": r_exec.procedure if r_exec else "",
-            "ExecutionLevel": r_exec.ExecutionLevel if r_exec else "",
-            "ExecNotes": r_exec.Notes if r_exec else "",
-            "HasAppeal": r_judg.HasAppeal if r_judg else False,
-            "CourtDecision": r_judg.CourtDecision if r_judg else "",
-            "CourtDecisionDate": r_judg.CourtDecisionDate if r_judg else None,
-            "DeputyGovernorDecision": r_judg.DeputyGovernorDecision if r_judg else None,
-            "DateDeputyGovernorDecision": r_judg.DateDeputyGovernorDecision if r_judg else None,
-            "FinalJudgement": r_judg.FinalJudgement if r_judg else None,
-            "FinalJudgementDate": r_judg.FinalJudgementDate if r_judg else None,
-            "TheFine": r_judg.TheFine if r_judg else None,
-            "NonExecutionNumber": r_judg.NonExecutionNumber if r_judg else None,
-            "DepartmentIssueDate": r_judg.DepartmentIssueDate if r_judg else None,
-            "FelonyNumber": r_judg.FelonyNumber if r_judg else None,
-            "JudgementNotes": r_judg.Notes if r_judg else "",
-            "ReconciliationNumber": r_recon.ReconciliationNumber if r_recon else "",
-            "ReconciliationDate": r_recon.ReconciliationDate if r_recon else "",
-            "FineAmount": r_recon.FineAmount if r_recon else None,
-            "ReconNotes": r_recon.Notes if r_recon else "",
-            "ViolationTypeName": r_vtype.ViolationTypeName if r_vtype else "",
-            "ViolationDescription": r_vtype.ViolationDescription if r_vtype else ""
-        })
+        data = []
+        for row_tuple in results:
+            r_case = row_tuple[0] if len(row_tuple) > 0 else None
+            r_off = row_tuple[1] if len(row_tuple) > 1 else None
+            r_loc = row_tuple[2] if len(row_tuple) > 2 else None
+            r_exec = row_tuple[3] if len(row_tuple) > 3 else None
+            r_judg = row_tuple[4] if len(row_tuple) > 4 else None
+            r_recon = row_tuple[5] if len(row_tuple) > 5 else None
+            r_vtype = row_tuple[6] if len(row_tuple) > 6 else None
 
-    return {
-        "status": "success",
-        "total": total_count,
-        "page": page,
-        "limit": limit,
-        "total_pages": math.ceil(total_count / limit) if total_count > 0 else 1,
-        "data": data
-    }
+            if not r_case:
+                continue
 
-# --- مسارات الإضافة والتعديل والأرشيف والتصدير المحسّنة للسحابة ---
+            raw_nat_id = _get_attr(r_off, "NationalID") or _get_attr(r_case, "NationalID")
+            nat_id_str = _safe_text(raw_nat_id, "")
+            if nat_id_str.endswith(".0"):
+                nat_id_str = nat_id_str[:-2]
+
+            raw_phone = _get_attr(r_off, "Phone")
+            phone_str = _safe_text(raw_phone, "")
+            if phone_str.endswith(".0"):
+                phone_str = phone_str[:-2]
+
+            exec_status_val = _get_attr(r_exec, "ExecutionStatusName") or _get_attr(r_exec, "procedure") or "تنفيذ جزئي"
+
+            data.append({
+                "CaseID": _get_attr(r_case, "CaseID"),
+                "SerialNo": _safe_text(_get_attr(r_case, "SerialNo"), ""),
+                "VariableCode": _safe_text(_get_attr(r_case, "VariableCode"), "-"),
+                "VariableDate": _safe_text(_get_attr(r_case, "VariableDate"), ""),
+                "CaseNumber": _safe_text(_get_attr(r_case, "CaseNumber"), "-"),
+                "CaseDate": _safe_text(_get_attr(r_case, "CaseDate"), ""),
+                "DecisionNumber": _safe_text(_get_attr(r_case, "DecisionNumber"), "-"),
+                "DecisionDate": _safe_text(_get_attr(r_case, "DecisionDate"), ""),
+                "year": _safe_text(_get_attr(r_case, "year"), ""),
+                "StopNumber": _safe_text(_get_attr(r_case, "StopNumber"), ""),
+                "AdminNumber": _safe_text(_get_attr(r_case, "AdminNumber"), ""),
+                "AreaSize": _safe_float_or_none(_get_attr(r_case, "AreaSize")) or 0.0,
+                "Notes": _safe_text(_get_attr(r_case, "Notes"), ""),
+                "Latitude": _safe_text(_get_attr(r_case, "Latitude"), ""),
+                "Longitude": _safe_text(_get_attr(r_case, "Longitude"), ""),
+                "OffenderName": _safe_text(_get_attr(r_off, "OffenderName"), "غير مسجل") if r_off else "غير مسجل",
+                "OffenderNationalID": nat_id_str,
+                "OffenderAddress": _safe_text(_get_attr(r_off, "OffenderAddress"), ""),
+                "Phone": phone_str,
+                "OffenderNotes": _safe_text(_get_attr(r_off, "Notes"), ""),
+                "StreetName": _safe_text(_get_attr(r_loc, "StreetName"), ""),
+                "DistrictName": _safe_text(_get_attr(r_loc, "DistrictName"), ""),
+                "FullAddress": _safe_text(_get_attr(r_loc, "FullAddress"), "") or _safe_text(_get_attr(r_loc, "StreetName"), ""),
+                "Landmark": _safe_text(_get_attr(r_loc, "Landmark"), ""),
+                "ExecutionStatusName": _safe_text(exec_status_val, "تنفيذ جزئي"),
+                "procedure": _safe_text(_get_attr(r_exec, "procedure"), ""),
+                "ExecutionLevel": _safe_text(_get_attr(r_exec, "ExecutionLevel"), ""),
+                "ExecNotes": _safe_text(_get_attr(r_exec, "Notes"), ""),
+                "HasAppeal": bool(_get_attr(r_judg, "HasAppeal", False)),
+                "CourtDecision": _safe_text(_get_attr(r_judg, "CourtDecision"), ""),
+                "CourtDecisionDate": _get_attr(r_judg, "CourtDecisionDate"),
+                "DeputyGovernorDecision": _get_attr(r_judg, "DeputyGovernorDecision"),
+                "DateDeputyGovernorDecision": _get_attr(r_judg, "DateDeputyGovernorDecision"),
+                "FinalJudgement": _get_attr(r_judg, "FinalJudgement"),
+                "FinalJudgementDate": _get_attr(r_judg, "FinalJudgementDate"),
+                "TheFine": _get_attr(r_judg, "TheFine"),
+                "NonExecutionNumber": _get_attr(r_judg, "NonExecutionNumber"),
+                "DepartmentIssueDate": _get_attr(r_judg, "DepartmentIssueDate"),
+                "FelonyNumber": _get_attr(r_judg, "FelonyNumber"),
+                "JudgementNotes": _safe_text(_get_attr(r_judg, "Notes"), ""),
+                "ReconciliationNumber": _safe_text(_get_attr(r_recon, "ReconciliationNumber"), ""),
+                "ReconciliationDate": _safe_text(_get_attr(r_recon, "ReconciliationDate"), ""),
+                "FineAmount": _get_attr(r_recon, "FineAmount"),
+                "ReconNotes": _safe_text(_get_attr(r_recon, "Notes"), ""),
+                "ViolationTypeName": _safe_text(_get_attr(r_vtype, "ViolationTypeName"), ""),
+                "ViolationDescription": _safe_text(_get_attr(r_vtype, "ViolationDescription"), ""),
+            })
+
+        return {
+            "status": "success",
+            "total": total_count,
+            "page": page,
+            "limit": limit,
+            "total_pages": math.ceil(total_count / limit) if total_count > 0 else 1,
+            "data": data,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"خطأ أثناء جلب بيانات المحاضر: {str(e)}")
+
+
+# --- مسارات الإضافة والتعديل والحذف والأرشيف المتوافقة مع السحابة وملف models ---
 @app.post("/api/cases")
 def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
     if user_data.get("role") == "Viewer":
         raise HTTPException(status_code=403, detail="غير مسموح")
     try:
-        if payload.CaseNumber and payload.CaseNumber.strip() and payload.CaseNumber != "-":
-            existing_case = db.query(Case).filter(Case.CaseNumber == payload.CaseNumber.strip(), Case.year == payload.year).first()
-            if existing_case:
-                return {"status": "error", "message": f"عذراً، رقم المحضر ({payload.CaseNumber}) لنفس السنة مسجل مسبقاً ولا يمكن تكراره لنفس السنة!"}
+        case_num_clean = _safe_text(payload.CaseNumber, "")
+        year_clean = _safe_text(payload.year, "")
+        if case_num_clean and case_num_clean != "-":
+            q_dup = db.query(Case).filter(Case.CaseNumber == case_num_clean)
+            if year_clean and _has_attr(Case, "year"):
+                q_dup = q_dup.filter(Case.year == year_clean)
+            if q_dup.first():
+                return {"status": "error", "message": f"عذراً، رقم المحضر ({case_num_clean}) لنفس السنة مسجل مسبقاً ولا يمكن تكراره لنفس السنة!"}
 
-        new_case = Case(
-            SerialNo=payload.SerialNo, VariableCode=payload.VariableCode or None, VariableDate=payload.VariableDate or None,
-            CaseNumber=payload.CaseNumber or None, CaseDate=payload.CaseDate or None, year=payload.year,
-            StopNumber=payload.StopNumber or None, AdminNumber=payload.AdminNumber or None, DecisionNumber=payload.DecisionNumber or None,
-            DecisionDate=payload.DecisionDate or None, AreaSize=payload.AreaSize, Notes=payload.Notes or None,
-            Latitude=payload.Latitude or None, Longitude=payload.Longitude or None
-        )
+        offender_id_val = None
+        if _has_attr(Case, "OffenderID"):
+            off_kwargs = {}
+            if _has_attr(Offender, "OffenderName"):
+                off_kwargs["OffenderName"] = _safe_text(payload.OffenderName, None)
+            if _has_attr(Offender, "NationalID"):
+                nat_s = _safe_text(payload.OffenderNationalID, None)
+                off_kwargs["NationalID"] = nat_s
+            if _has_attr(Offender, "OffenderAddress"):
+                off_kwargs["OffenderAddress"] = _safe_text(payload.OffenderAddress, None)
+            if _has_attr(Offender, "Phone"):
+                off_kwargs["Phone"] = _safe_text(payload.Phone, None)
+            if _has_attr(Offender, "Notes"):
+                off_kwargs["Notes"] = _safe_text(payload.OffenderNotes, None)
+            new_off = Offender(**off_kwargs)
+            db.add(new_off)
+            db.flush()
+            offender_id_val = new_off.OffenderID
+
+        location_id_val = None
+        if _has_attr(Case, "LocationID"):
+            loc_kwargs = {}
+            if _has_attr(Location, "StreetName"):
+                loc_kwargs["StreetName"] = _safe_text(payload.StreetName, None)
+            if _has_attr(Location, "DistrictName"):
+                loc_kwargs["DistrictName"] = _safe_text(payload.DistrictName, None)
+            if _has_attr(Location, "FullAddress"):
+                loc_kwargs["FullAddress"] = _safe_text(payload.FullAddress, None)
+            if _has_attr(Location, "Landmark"):
+                loc_kwargs["Landmark"] = _safe_text(payload.Landmark, None)
+            new_loc = Location(**loc_kwargs)
+            db.add(new_loc)
+            db.flush()
+            location_id_val = new_loc.LocationID
+
+        case_kwargs = {}
+        if _has_attr(Case, "SerialNo"):
+            case_kwargs["SerialNo"] = _safe_int_or_none(payload.SerialNo)
+        if _has_attr(Case, "VariableCode"):
+            case_kwargs["VariableCode"] = _safe_text(payload.VariableCode, None)
+        if _has_attr(Case, "VariableDate"):
+            case_kwargs["VariableDate"] = _safe_text(payload.VariableDate, None)
+        if _has_attr(Case, "CaseNumber"):
+            case_kwargs["CaseNumber"] = case_num_clean or None
+        if _has_attr(Case, "CaseDate"):
+            case_kwargs["CaseDate"] = _safe_text(payload.CaseDate, None)
+        if _has_attr(Case, "NationalID"):
+            case_kwargs["NationalID"] = _safe_text(payload.OffenderNationalID, None)
+        if _has_attr(Case, "year"):
+            case_kwargs["year"] = year_clean or None
+        if _has_attr(Case, "StopNumber"):
+            case_kwargs["StopNumber"] = _safe_text(payload.StopNumber, None)
+        if _has_attr(Case, "AdminNumber"):
+            case_kwargs["AdminNumber"] = _safe_text(payload.AdminNumber, None)
+        if _has_attr(Case, "DecisionNumber"):
+            case_kwargs["DecisionNumber"] = _safe_text(payload.DecisionNumber, None)
+        if _has_attr(Case, "DecisionDate"):
+            case_kwargs["DecisionDate"] = _safe_text(payload.DecisionDate, None)
+        if _has_attr(Case, "AreaSize"):
+            case_kwargs["AreaSize"] = _safe_float_or_none(payload.AreaSize)
+        if _has_attr(Case, "Notes"):
+            case_kwargs["Notes"] = _safe_text(payload.Notes, None)
+        if _has_attr(Case, "Latitude"):
+            case_kwargs["Latitude"] = _safe_text(payload.Latitude, None)
+        if _has_attr(Case, "Longitude"):
+            case_kwargs["Longitude"] = _safe_text(payload.Longitude, None)
+        if _has_attr(Case, "OffenderID"):
+            case_kwargs["OffenderID"] = offender_id_val
+        if _has_attr(Case, "LocationID"):
+            case_kwargs["LocationID"] = location_id_val
+
+        new_case = Case(**case_kwargs)
         db.add(new_case)
         db.flush()
         cid = new_case.CaseID
 
-        db.add(Offender(CaseID=cid, OffenderName=payload.OffenderName or None, NationalID=payload.OffenderNationalID, OffenderAddress=payload.OffenderAddress or None, Phone=payload.Phone, Notes=payload.OffenderNotes or None))
-        db.add(Location(CaseID=cid, StreetName=payload.StreetName or None, DistrictName=payload.DistrictName or None, FullAddress=payload.FullAddress or None, Landmark=payload.Landmark or None))
-        db.add(ExecutionStatus(CaseID=cid, ExecutionStatusName=payload.ExecutionStatusName or "تنفيذ جزئي", procedure=payload.procedure or None, ExecutionLevel=payload.ExecutionLevel or None, Notes=payload.ExecNotes or None))
-        db.add(Judgement(CaseID=cid, HasAppeal=payload.HasAppeal, CourtDecision=payload.CourtDecision or None, CourtDecisionDate=payload.CourtDecisionDate, DeputyGovernorDecision=payload.DeputyGovernorDecision, DateDeputyGovernorDecision=payload.DateDeputyGovernorDecision, FinalJudgement=payload.FinalJudgement, FinalJudgementDate=payload.FinalJudgementDate, TheFine=payload.TheFine, NonExecutionNumber=payload.NonExecutionNumber, DepartmentIssueDate=payload.DepartmentIssueDate, FelonyNumber=payload.FelonyNumber, Notes=payload.JudgementNotes or None))
-        db.add(Reconciliation(CaseID=cid, ReconciliationNumber=payload.ReconciliationNumber or None, ReconciliationDate=payload.ReconciliationDate or None, FineAmount=payload.FineAmount, Notes=payload.ReconNotes or None))
-        db.add(ViolationType(CaseID=cid, ViolationTypeName=payload.ViolationTypeName or None, ViolationDescription=payload.ViolationDescription or None))
+        if not _has_attr(Case, "OffenderID") and _has_attr(Offender, "CaseID"):
+            db.add(Offender(
+                CaseID=cid,
+                OffenderName=_safe_text(payload.OffenderName, None),
+                NationalID=_safe_text(payload.OffenderNationalID, None),
+                OffenderAddress=_safe_text(payload.OffenderAddress, None) if _has_attr(Offender, "OffenderAddress") else None,
+                Phone=_safe_text(payload.Phone, None) if _has_attr(Offender, "Phone") else None,
+                Notes=_safe_text(payload.OffenderNotes, None) if _has_attr(Offender, "Notes") else None,
+            ))
+
+        if not _has_attr(Case, "LocationID") and _has_attr(Location, "CaseID"):
+            db.add(Location(
+                CaseID=cid,
+                StreetName=_safe_text(payload.StreetName, None),
+                DistrictName=_safe_text(payload.DistrictName, None),
+                FullAddress=_safe_text(payload.FullAddress, None) if _has_attr(Location, "FullAddress") else None,
+                Landmark=_safe_text(payload.Landmark, None) if _has_attr(Location, "Landmark") else None,
+            ))
+
+        exec_kwargs = {"CaseID": cid}
+        if _has_attr(ExecutionStatus, "ExecutionStatusName"):
+            exec_kwargs["ExecutionStatusName"] = _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+        if _has_attr(ExecutionStatus, "procedure"):
+            exec_kwargs["procedure"] = _safe_text(payload.procedure, None) or _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+        if _has_attr(ExecutionStatus, "ExecutionLevel"):
+            exec_kwargs["ExecutionLevel"] = _safe_text(payload.ExecutionLevel, None)
+        if _has_attr(ExecutionStatus, "Notes"):
+            exec_kwargs["Notes"] = _safe_text(payload.ExecNotes, None)
+        db.add(ExecutionStatus(**exec_kwargs))
+
+        if "Judgement" in globals() and _has_attr(Judgement, "CaseID"):
+            db.add(Judgement(
+                CaseID=cid,
+                HasAppeal=payload.HasAppeal,
+                CourtDecision=_safe_text(payload.CourtDecision, None),
+                CourtDecisionDate=payload.CourtDecisionDate,
+                DeputyGovernorDecision=payload.DeputyGovernorDecision,
+                DateDeputyGovernorDecision=payload.DateDeputyGovernorDecision,
+                FinalJudgement=payload.FinalJudgement,
+                FinalJudgementDate=payload.FinalJudgementDate,
+                TheFine=payload.TheFine,
+                NonExecutionNumber=payload.NonExecutionNumber,
+                DepartmentIssueDate=payload.DepartmentIssueDate,
+                FelonyNumber=payload.FelonyNumber,
+                Notes=_safe_text(payload.JudgementNotes, None),
+            ))
+
+        if "Reconciliation" in globals() and _has_attr(Reconciliation, "CaseID"):
+            db.add(Reconciliation(
+                CaseID=cid,
+                ReconciliationNumber=_safe_text(payload.ReconciliationNumber, None),
+                ReconciliationDate=_safe_text(payload.ReconciliationDate, None),
+                FineAmount=payload.FineAmount,
+                Notes=_safe_text(payload.ReconNotes, None),
+            ))
+
+        if "ViolationType" in globals() and _has_attr(ViolationType, "CaseID"):
+            db.add(ViolationType(
+                CaseID=cid,
+                ViolationTypeName=_safe_text(payload.ViolationTypeName, None),
+                ViolationDescription=_safe_text(payload.ViolationDescription, None),
+            ))
 
         db.commit()
         log_audit(db, user_data.get("sub"), "INSERT", "tbl_cases", f"إضافة محضر جديد ID: {cid}")
@@ -746,6 +947,7 @@ def create_case(payload: CaseFullPayload, user_data: dict = Depends(get_current_
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": str(e)}
+
 
 @app.put("/api/cases/{case_id}")
 def update_case(case_id: int, payload: CaseFullPayload, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
@@ -755,54 +957,179 @@ def update_case(case_id: int, payload: CaseFullPayload, user_data: dict = Depend
         c = db.query(Case).filter(Case.CaseID == case_id).first()
         if not c:
             raise HTTPException(status_code=404, detail="غير موجود")
-        c.SerialNo = payload.SerialNo; c.VariableCode = payload.VariableCode or None; c.VariableDate = payload.VariableDate or None
-        c.CaseNumber = payload.CaseNumber or None; c.CaseDate = payload.CaseDate or None; c.year = payload.year
-        c.StopNumber = payload.StopNumber or None; c.AdminNumber = payload.AdminNumber or None; c.DecisionNumber = payload.DecisionNumber or None
-        c.DecisionDate = payload.DecisionDate or None; c.AreaSize = payload.AreaSize; c.Notes = payload.Notes or None
-        c.Latitude = payload.Latitude or None; c.Longitude = payload.Longitude or None
 
-        off = db.query(Offender).filter(Offender.CaseID == case_id).first()
+        if _has_attr(Case, "SerialNo"):
+            c.SerialNo = _safe_int_or_none(payload.SerialNo)
+        if _has_attr(Case, "VariableCode"):
+            c.VariableCode = _safe_text(payload.VariableCode, None)
+        if _has_attr(Case, "VariableDate"):
+            c.VariableDate = _safe_text(payload.VariableDate, None)
+        if _has_attr(Case, "CaseNumber"):
+            c.CaseNumber = _safe_text(payload.CaseNumber, None)
+        if _has_attr(Case, "CaseDate"):
+            c.CaseDate = _safe_text(payload.CaseDate, None)
+        if _has_attr(Case, "NationalID"):
+            c.NationalID = _safe_text(payload.OffenderNationalID, None)
+        if _has_attr(Case, "year"):
+            c.year = _safe_text(payload.year, None)
+        if _has_attr(Case, "StopNumber"):
+            c.StopNumber = _safe_text(payload.StopNumber, None)
+        if _has_attr(Case, "AdminNumber"):
+            c.AdminNumber = _safe_text(payload.AdminNumber, None)
+        if _has_attr(Case, "DecisionNumber"):
+            c.DecisionNumber = _safe_text(payload.DecisionNumber, None)
+        if _has_attr(Case, "DecisionDate"):
+            c.DecisionDate = _safe_text(payload.DecisionDate, None)
+        if _has_attr(Case, "AreaSize"):
+            c.AreaSize = _safe_float_or_none(payload.AreaSize)
+        if _has_attr(Case, "Notes"):
+            c.Notes = _safe_text(payload.Notes, None)
+        if _has_attr(Case, "Latitude"):
+            c.Latitude = _safe_text(payload.Latitude, None)
+        if _has_attr(Case, "Longitude"):
+            c.Longitude = _safe_text(payload.Longitude, None)
+
+        off = None
+        if _has_attr(Case, "OffenderID") and getattr(c, "OffenderID", None):
+            off = db.query(Offender).filter(Offender.OffenderID == c.OffenderID).first()
+        elif _has_attr(Offender, "CaseID"):
+            off = db.query(Offender).filter(Offender.CaseID == case_id).first()
+
         if off:
-            off.OffenderName = payload.OffenderName or None; off.NationalID = payload.OffenderNationalID
-            off.OffenderAddress = payload.OffenderAddress or None; off.Phone = payload.Phone; off.Notes = payload.OffenderNotes or None
+            if _has_attr(Offender, "OffenderName"):
+                off.OffenderName = _safe_text(payload.OffenderName, None)
+            if _has_attr(Offender, "NationalID"):
+                off.NationalID = _safe_text(payload.OffenderNationalID, None)
+            if _has_attr(Offender, "OffenderAddress"):
+                off.OffenderAddress = _safe_text(payload.OffenderAddress, None)
+            if _has_attr(Offender, "Phone"):
+                off.Phone = _safe_text(payload.Phone, None)
+            if _has_attr(Offender, "Notes"):
+                off.Notes = _safe_text(payload.OffenderNotes, None)
         else:
-            db.add(Offender(CaseID=case_id, OffenderName=payload.OffenderName or None, NationalID=payload.OffenderNationalID, OffenderAddress=payload.OffenderAddress or None, Phone=payload.Phone, Notes=payload.OffenderNotes or None))
+            off_kwargs = {}
+            if _has_attr(Offender, "CaseID"):
+                off_kwargs["CaseID"] = case_id
+            if _has_attr(Offender, "OffenderName"):
+                off_kwargs["OffenderName"] = _safe_text(payload.OffenderName, None)
+            if _has_attr(Offender, "NationalID"):
+                off_kwargs["NationalID"] = _safe_text(payload.OffenderNationalID, None)
+            if _has_attr(Offender, "OffenderAddress"):
+                off_kwargs["OffenderAddress"] = _safe_text(payload.OffenderAddress, None)
+            if _has_attr(Offender, "Phone"):
+                off_kwargs["Phone"] = _safe_text(payload.Phone, None)
+            if _has_attr(Offender, "Notes"):
+                off_kwargs["Notes"] = _safe_text(payload.OffenderNotes, None)
+            new_off = Offender(**off_kwargs)
+            db.add(new_off)
+            db.flush()
+            if _has_attr(Case, "OffenderID"):
+                c.OffenderID = new_off.OffenderID
 
-        loc = db.query(Location).filter(Location.CaseID == case_id).first()
+        loc = None
+        if _has_attr(Case, "LocationID") and getattr(c, "LocationID", None):
+            loc = db.query(Location).filter(Location.LocationID == c.LocationID).first()
+        elif _has_attr(Location, "CaseID"):
+            loc = db.query(Location).filter(Location.CaseID == case_id).first()
+
         if loc:
-            loc.StreetName = payload.StreetName or None; loc.DistrictName = payload.DistrictName or None
-            loc.FullAddress = payload.FullAddress or None; loc.Landmark = payload.Landmark or None
+            if _has_attr(Location, "StreetName"):
+                loc.StreetName = _safe_text(payload.StreetName, None)
+            if _has_attr(Location, "DistrictName"):
+                loc.DistrictName = _safe_text(payload.DistrictName, None)
+            if _has_attr(Location, "FullAddress"):
+                loc.FullAddress = _safe_text(payload.FullAddress, None)
+            if _has_attr(Location, "Landmark"):
+                loc.Landmark = _safe_text(payload.Landmark, None)
         else:
-            db.add(Location(CaseID=case_id, StreetName=payload.StreetName or None, DistrictName=payload.DistrictName or None, FullAddress=payload.FullAddress or None, Landmark=payload.Landmark or None))
+            loc_kwargs = {}
+            if _has_attr(Location, "CaseID"):
+                loc_kwargs["CaseID"] = case_id
+            if _has_attr(Location, "StreetName"):
+                loc_kwargs["StreetName"] = _safe_text(payload.StreetName, None)
+            if _has_attr(Location, "DistrictName"):
+                loc_kwargs["DistrictName"] = _safe_text(payload.DistrictName, None)
+            if _has_attr(Location, "FullAddress"):
+                loc_kwargs["FullAddress"] = _safe_text(payload.FullAddress, None)
+            if _has_attr(Location, "Landmark"):
+                loc_kwargs["Landmark"] = _safe_text(payload.Landmark, None)
+            new_loc = Location(**loc_kwargs)
+            db.add(new_loc)
+            db.flush()
+            if _has_attr(Case, "LocationID"):
+                c.LocationID = new_loc.LocationID
 
         ex = db.query(ExecutionStatus).filter(ExecutionStatus.CaseID == case_id).first()
         if ex:
-            ex.ExecutionStatusName = payload.ExecutionStatusName or "تنفيذ جزئي"; ex.procedure = payload.procedure or None
-            ex.ExecutionLevel = payload.ExecutionLevel or None; ex.Notes = payload.ExecNotes or None
+            if _has_attr(ExecutionStatus, "ExecutionStatusName"):
+                ex.ExecutionStatusName = _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+            if _has_attr(ExecutionStatus, "procedure"):
+                ex.procedure = _safe_text(payload.procedure, None) or _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+            if _has_attr(ExecutionStatus, "ExecutionLevel"):
+                ex.ExecutionLevel = _safe_text(payload.ExecutionLevel, None)
+            if _has_attr(ExecutionStatus, "Notes"):
+                ex.Notes = _safe_text(payload.ExecNotes, None)
         else:
-            db.add(ExecutionStatus(CaseID=case_id, ExecutionStatusName=payload.ExecutionStatusName or "تنفيذ جزئي", procedure=payload.procedure or None, ExecutionLevel=payload.ExecutionLevel or None, Notes=payload.ExecNotes or None))
+            exec_kwargs = {"CaseID": case_id}
+            if _has_attr(ExecutionStatus, "ExecutionStatusName"):
+                exec_kwargs["ExecutionStatusName"] = _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+            if _has_attr(ExecutionStatus, "procedure"):
+                exec_kwargs["procedure"] = _safe_text(payload.procedure, None) or _safe_text(payload.ExecutionStatusName, "تنفيذ جزئي")
+            if _has_attr(ExecutionStatus, "ExecutionLevel"):
+                exec_kwargs["ExecutionLevel"] = _safe_text(payload.ExecutionLevel, None)
+            if _has_attr(ExecutionStatus, "Notes"):
+                exec_kwargs["Notes"] = _safe_text(payload.ExecNotes, None)
+            db.add(ExecutionStatus(**exec_kwargs))
 
-        jd = db.query(Judgement).filter(Judgement.CaseID == case_id).first()
-        if jd:
-            jd.HasAppeal = payload.HasAppeal; jd.CourtDecision = payload.CourtDecision or None; jd.CourtDecisionDate = payload.CourtDecisionDate
-            jd.DeputyGovernorDecision = payload.DeputyGovernorDecision; jd.DateDeputyGovernorDecision = payload.DateDeputyGovernorDecision
-            jd.FinalJudgement = payload.FinalJudgement; jd.FinalJudgementDate = payload.FinalJudgementDate; jd.TheFine = payload.TheFine
-            jd.NonExecutionNumber = payload.NonExecutionNumber; jd.DepartmentIssueDate = payload.DepartmentIssueDate; jd.FelonyNumber = payload.FelonyNumber; jd.Notes = payload.JudgementNotes or None
-        else:
-            db.add(Judgement(CaseID=case_id, HasAppeal=payload.HasAppeal, CourtDecision=payload.CourtDecision or None, CourtDecisionDate=payload.CourtDecisionDate, DeputyGovernorDecision=payload.DeputyGovernorDecision, DateDeputyGovernorDecision=payload.DateDeputyGovernorDecision, FinalJudgement=payload.FinalJudgement, FinalJudgementDate=payload.FinalJudgementDate, TheFine=payload.TheFine, NonExecutionNumber=payload.NonExecutionNumber, DepartmentIssueDate=payload.DepartmentIssueDate, FelonyNumber=payload.FelonyNumber, Notes=payload.JudgementNotes or None))
+        if "Judgement" in globals() and _has_attr(Judgement, "CaseID"):
+            jd = db.query(Judgement).filter(Judgement.CaseID == case_id).first()
+            if jd:
+                jd.HasAppeal = payload.HasAppeal
+                jd.CourtDecision = _safe_text(payload.CourtDecision, None)
+                jd.CourtDecisionDate = payload.CourtDecisionDate
+                jd.DeputyGovernorDecision = payload.DeputyGovernorDecision
+                jd.DateDeputyGovernorDecision = payload.DateDeputyGovernorDecision
+                jd.FinalJudgement = payload.FinalJudgement
+                jd.FinalJudgementDate = payload.FinalJudgementDate
+                jd.TheFine = payload.TheFine
+                jd.NonExecutionNumber = payload.NonExecutionNumber
+                jd.DepartmentIssueDate = payload.DepartmentIssueDate
+                jd.FelonyNumber = payload.FelonyNumber
+                jd.Notes = _safe_text(payload.JudgementNotes, None)
+            else:
+                db.add(Judgement(
+                    CaseID=case_id, HasAppeal=payload.HasAppeal, CourtDecision=_safe_text(payload.CourtDecision, None),
+                    CourtDecisionDate=payload.CourtDecisionDate, DeputyGovernorDecision=payload.DeputyGovernorDecision,
+                    DateDeputyGovernorDecision=payload.DateDeputyGovernorDecision, FinalJudgement=payload.FinalJudgement,
+                    FinalJudgementDate=payload.FinalJudgementDate, TheFine=payload.TheFine,
+                    NonExecutionNumber=payload.NonExecutionNumber, DepartmentIssueDate=payload.DepartmentIssueDate,
+                    FelonyNumber=payload.FelonyNumber, Notes=_safe_text(payload.JudgementNotes, None),
+                ))
 
-        rc = db.query(Reconciliation).filter(Reconciliation.CaseID == case_id).first()
-        if rc:
-            rc.ReconciliationNumber = payload.ReconciliationNumber or None; rc.ReconciliationDate = payload.ReconciliationDate or None
-            rc.FineAmount = payload.FineAmount; rc.Notes = payload.ReconNotes or None
-        else:
-            db.add(Reconciliation(CaseID=case_id, ReconciliationNumber=payload.ReconciliationNumber or None, ReconciliationDate=payload.ReconciliationDate or None, FineAmount=payload.FineAmount, Notes=payload.ReconNotes or None))
+        if "Reconciliation" in globals() and _has_attr(Reconciliation, "CaseID"):
+            rc = db.query(Reconciliation).filter(Reconciliation.CaseID == case_id).first()
+            if rc:
+                rc.ReconciliationNumber = _safe_text(payload.ReconciliationNumber, None)
+                rc.ReconciliationDate = _safe_text(payload.ReconciliationDate, None)
+                rc.FineAmount = payload.FineAmount
+                rc.Notes = _safe_text(payload.ReconNotes, None)
+            else:
+                db.add(Reconciliation(
+                    CaseID=case_id, ReconciliationNumber=_safe_text(payload.ReconciliationNumber, None),
+                    ReconciliationDate=_safe_text(payload.ReconciliationDate, None), FineAmount=payload.FineAmount,
+                    Notes=_safe_text(payload.ReconNotes, None),
+                ))
 
-        vt = db.query(ViolationType).filter(ViolationType.CaseID == case_id).first()
-        if vt:
-            vt.ViolationTypeName = payload.ViolationTypeName or None; vt.ViolationDescription = payload.ViolationDescription or None
-        else:
-            db.add(ViolationType(CaseID=case_id, ViolationTypeName=payload.ViolationTypeName or None, ViolationDescription=payload.ViolationDescription or None))
+        if "ViolationType" in globals() and _has_attr(ViolationType, "CaseID"):
+            vt = db.query(ViolationType).filter(ViolationType.CaseID == case_id).first()
+            if vt:
+                vt.ViolationTypeName = _safe_text(payload.ViolationTypeName, None)
+                vt.ViolationDescription = _safe_text(payload.ViolationDescription, None)
+            else:
+                db.add(ViolationType(
+                    CaseID=case_id, ViolationTypeName=_safe_text(payload.ViolationTypeName, None),
+                    ViolationDescription=_safe_text(payload.ViolationDescription, None),
+                ))
 
         db.commit()
         log_audit(db, user_data.get("sub"), "UPDATE", "tbl_cases", f"تعديل المحضر ID: {case_id}")
@@ -810,6 +1137,38 @@ def update_case(case_id: int, payload: CaseFullPayload, user_data: dict = Depend
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": str(e)}
+
+
+@app.delete("/api/cases/{case_id}")
+def delete_case(case_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
+    if user_data.get("role") not in ["Admin", "Supervisor"]:
+        raise HTTPException(status_code=403, detail="غير مسموح")
+    try:
+        if _has_attr(ExecutionStatus, "CaseID"):
+            db.query(ExecutionStatus).filter(ExecutionStatus.CaseID == case_id).delete()
+        if "Judgement" in globals() and _has_attr(Judgement, "CaseID"):
+            db.query(Judgement).filter(Judgement.CaseID == case_id).delete()
+        if "Reconciliation" in globals() and _has_attr(Reconciliation, "CaseID"):
+            db.query(Reconciliation).filter(Reconciliation.CaseID == case_id).delete()
+        if "ViolationType" in globals() and _has_attr(ViolationType, "CaseID"):
+            db.query(ViolationType).filter(ViolationType.CaseID == case_id).delete()
+        if _has_attr(Archive, "CaseID"):
+            db.query(Archive).filter(Archive.CaseID == case_id).delete()
+        if _has_attr(Offender, "CaseID"):
+            db.query(Offender).filter(Offender.CaseID == case_id).delete()
+        if _has_attr(Location, "CaseID"):
+            db.query(Location).filter(Location.CaseID == case_id).delete()
+
+        db.query(Case).filter(Case.CaseID == case_id).delete()
+        db.commit()
+        log_audit(db, user_data.get("sub"), "DELETE", "tbl_cases", f"حذف سجل ID: {case_id}")
+        return {"status": "success", "message": "تم الحذف بنجاح"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+
+
+ARCHIVE_BASE_DIR = os.getenv("ARCHIVE_BASE_DIR", os.path.join(BASE_DIR, "archive_violations"))
 
 @app.delete("/api/cases/{case_id}")
 def delete_case(case_id: int, user_data: dict = Depends(get_current_user_payload), db: Session = Depends(get_db)):
