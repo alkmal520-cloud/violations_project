@@ -123,7 +123,20 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- النماذج والجداول السيادية ---
+from sqlalchemy import inspect as sa_inspect
+
+
+def _get_table_columns(table_name: str) -> set:
+    try:
+        inspector = sa_inspect(engine)
+        if table_name in inspector.get_table_names():
+            return {col["name"] for col in inspector.get_columns(table_name)}
+    except Exception:
+        pass
+    return set()
+
+
+# --- النماذج والجداول السيادية (متوافقة مع أنواع قاعدة البيانات السحابية والبيانات النصية) ---
 class User(Base):
     __tablename__ = "tbl_users"
     UserID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
@@ -134,6 +147,7 @@ class User(Base):
     IsActive = Column(Boolean, nullable=True, default=True)
     CreatedAt = Column(Text, nullable=True)
 
+
 class AuditLog(Base):
     __tablename__ = "tbl_audit_logs"
     LogID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
@@ -143,33 +157,39 @@ class AuditLog(Base):
     Details = Column(Text, nullable=True)
     Timestamp = Column(Text, nullable=True)
 
+
 class Case(Base):
     __tablename__ = "tbl_cases"
     CaseID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    SerialNo = Column(BigInteger, nullable=True)
+    SerialNo = Column(Text, nullable=True)
     VariableCode = Column(Text, index=True, nullable=True)
     VariableDate = Column(Text, nullable=True)
     CaseNumber = Column(Text, index=True, nullable=True)
     CaseDate = Column(Text, nullable=True)
-    year = Column(BigInteger, index=True, nullable=True)
+    NationalID = Column(Text, nullable=True)
+    year = Column(Text, index=True, nullable=True)
     StopNumber = Column(Text, nullable=True)
     AdminNumber = Column(Text, nullable=True)
     DecisionNumber = Column(Text, index=True, nullable=True)
     DecisionDate = Column(Text, nullable=True)
-    AreaSize = Column(Float, nullable=True)
+    AreaSize = Column(Text, nullable=True)
     Notes = Column(Text, nullable=True)
     Latitude = Column(Text, nullable=True)
     Longitude = Column(Text, nullable=True)
+    OffenderID = Column(BigInteger, nullable=True)
+    LocationID = Column(BigInteger, nullable=True)
+
 
 class Offender(Base):
     __tablename__ = "tbl_offenders"
     OffenderID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     CaseID = Column(BigInteger, nullable=True)
     OffenderName = Column(Text, index=True, nullable=True)
-    NationalID = Column(Float, index=True, nullable=True)
+    NationalID = Column(Text, index=True, nullable=True)
     OffenderAddress = Column(Text, nullable=True)
-    Phone = Column(Float, nullable=True)
+    Phone = Column(Text, nullable=True)
     Notes = Column(Text, nullable=True)
+
 
 class Location(Base):
     __tablename__ = "tbl_locations"
@@ -180,9 +200,11 @@ class Location(Base):
     FullAddress = Column(Text, nullable=True)
     Landmark = Column(Text, nullable=True)
 
+
 class ExecutionStatus(Base):
     __tablename__ = "tbl_executionstatus"
     ExecutionStatusID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    StatusID = Column(BigInteger, nullable=True)
     CaseID = Column(BigInteger, nullable=True)
     ExecutionStatusName = Column(Text, index=True, nullable=True)
     procedure = Column(Text, nullable=True)
@@ -190,22 +212,24 @@ class ExecutionStatus(Base):
     Notes = Column(Text, nullable=True)
     IsClosed = Column(Boolean, nullable=True)
 
+
 class Judgement(Base):
     __tablename__ = "tbl_judgements"
     JudgementID = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     CaseID = Column(BigInteger, nullable=True)
     HasAppeal = Column(Boolean, nullable=True)
     CourtDecision = Column(Text, nullable=True)
-    CourtDecisionDate = Column(Float, nullable=True)
-    DeputyGovernorDecision = Column("Deputy Governor Decision", BigInteger, nullable=True)
-    DateDeputyGovernorDecision = Column("Date Deputy Governor's Decision", Float, nullable=True)
-    FinalJudgement = Column(Float, nullable=True)
-    FinalJudgementDate = Column(Float, nullable=True)
-    TheFine = Column("The fine", Float, nullable=True)
-    NonExecutionNumber = Column(BigInteger, nullable=True)
-    DepartmentIssueDate = Column("Department issue date", Float, nullable=True)
-    FelonyNumber = Column(Float, nullable=True)
+    CourtDecisionDate = Column(Text, nullable=True)
+    DeputyGovernorDecision = Column("Deputy Governor Decision", Text, nullable=True)
+    DateDeputyGovernorDecision = Column("Date Deputy Governor's Decision", Text, nullable=True)
+    FinalJudgement = Column(Text, nullable=True)
+    FinalJudgementDate = Column(Text, nullable=True)
+    TheFine = Column("The fine", Text, nullable=True)
+    NonExecutionNumber = Column(Text, nullable=True)
+    DepartmentIssueDate = Column("Department issue date", Text, nullable=True)
+    FelonyNumber = Column(Text, nullable=True)
     Notes = Column(Text, nullable=True)
+
 
 class Reconciliation(Base):
     __tablename__ = "tbl_reconciliation"
@@ -213,10 +237,11 @@ class Reconciliation(Base):
     CaseID = Column(BigInteger, nullable=True)
     ReconciliationNumber = Column(Text, nullable=True)
     ReconciliationDate = Column(Text, nullable=True)
-    FineAmount = Column(Float, nullable=True)
-    NonExecutionNumber = Column(Float, nullable=True)
-    DepartmentIssueDate = Column(Float, nullable=True)
+    FineAmount = Column(Text, nullable=True)
+    NonExecutionNumber = Column(Text, nullable=True)
+    DepartmentIssueDate = Column(Text, nullable=True)
     Notes = Column(Text, nullable=True)
+
 
 class ViolationType(Base):
     __tablename__ = "tbl_violationtypes"
@@ -224,6 +249,7 @@ class ViolationType(Base):
     CaseID = Column(BigInteger, nullable=True)
     ViolationTypeName = Column(Text, nullable=True)
     ViolationDescription = Column(Text, nullable=True)
+
 
 class Archive(Base):
     __tablename__ = "tbl_Archive"
@@ -233,6 +259,7 @@ class Archive(Base):
     FileName = Column(Text, nullable=True)
     FilePath = Column(Text, nullable=True)
     UploadDate = Column(Text, nullable=True)
+
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -254,12 +281,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
 
 def log_audit(db: Session, username: str, action: str, table: str, details: str):
     try:
@@ -278,8 +307,10 @@ def log_audit(db: Session, username: str, action: str, table: str, details: str)
         except Exception:
             pass
 
+
 def get_current_user_payload(credentials: HTTPAuthorizationCredentials = Depends(security)):
     return decode_access_token(credentials.credentials)
+
 
 def build_filtered_cases_query(
     db: Session,
@@ -296,83 +327,147 @@ def build_filtered_cases_query(
     status: Optional[str] = "",
     district: Optional[str] = "",
     vtype: Optional[str] = "",
-    year: Optional[int] = None,
+    year: Optional[str] = None,
 ):
-    query = db.query(Case, Offender, Location, ExecutionStatus, Judgement, Reconciliation, ViolationType)\
-              .outerjoin(Offender, Case.CaseID == Offender.CaseID)\
-              .outerjoin(Location, Case.CaseID == Location.CaseID)\
-              .outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)\
-              .outerjoin(Judgement, Case.CaseID == Judgement.CaseID)\
-              .outerjoin(Reconciliation, Case.CaseID == Reconciliation.CaseID)\
-              .outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
+    case_cols = _get_table_columns("tbl_cases")
+    off_cols = _get_table_columns("tbl_offenders")
+    loc_cols = _get_table_columns("tbl_locations")
+    exec_cols = _get_table_columns("tbl_executionstatus")
+    judg_cols = _get_table_columns("tbl_judgements")
+    recon_cols = _get_table_columns("tbl_reconciliation")
+    vtype_cols = _get_table_columns("tbl_violationtypes")
 
-    if var_code and var_code.strip():
+    query = db.query(Case, Offender, Location, ExecutionStatus, Judgement, Reconciliation, ViolationType)
+
+    if "OffenderID" in case_cols and "OffenderID" in off_cols:
+        query = query.outerjoin(Offender, Case.OffenderID == Offender.OffenderID)
+    elif "CaseID" in off_cols:
+        query = query.outerjoin(Offender, Case.CaseID == Offender.CaseID)
+    else:
+        query = query.outerjoin(Offender, False)
+
+    if "LocationID" in case_cols and "LocationID" in loc_cols:
+        query = query.outerjoin(Location, Case.LocationID == Location.LocationID)
+    elif "CaseID" in loc_cols:
+        query = query.outerjoin(Location, Case.CaseID == Location.CaseID)
+    else:
+        query = query.outerjoin(Location, False)
+
+    if "CaseID" in exec_cols:
+        query = query.outerjoin(ExecutionStatus, Case.CaseID == ExecutionStatus.CaseID)
+    else:
+        query = query.outerjoin(ExecutionStatus, False)
+
+    if "CaseID" in judg_cols:
+        query = query.outerjoin(Judgement, Case.CaseID == Judgement.CaseID)
+    else:
+        query = query.outerjoin(Judgement, False)
+
+    if "CaseID" in recon_cols:
+        query = query.outerjoin(Reconciliation, Case.CaseID == Reconciliation.CaseID)
+    else:
+        query = query.outerjoin(Reconciliation, False)
+
+    if "CaseID" in vtype_cols:
+        query = query.outerjoin(ViolationType, Case.CaseID == ViolationType.CaseID)
+    else:
+        query = query.outerjoin(ViolationType, False)
+
+    if var_code and var_code.strip() and "VariableCode" in case_cols:
         query = query.filter(Case.VariableCode.ilike(f"%{var_code.strip()}%"))
-    if case_no and case_no.strip():
+    if case_no and case_no.strip() and "CaseNumber" in case_cols:
         query = query.filter(Case.CaseNumber.ilike(f"%{case_no.strip()}%"))
-    if decision_no and decision_no.strip():
+    if decision_no and decision_no.strip() and "DecisionNumber" in case_cols:
         query = query.filter(Case.DecisionNumber.ilike(f"%{decision_no.strip()}%"))
-    if national_id and national_id.strip():
-        try:
-            n_val = float(national_id.strip())
-            query = query.filter(Offender.NationalID == n_val)
-        except Exception:
-            query = query.filter(Offender.NationalID == -999999)
 
-    if lat and lat.strip():
+    if national_id and national_id.strip():
+        nat_q = f"%{national_id.strip()}%"
+        nat_filters = []
+        if "NationalID" in off_cols:
+            nat_filters.append(Offender.NationalID.ilike(nat_q))
+        if "NationalID" in case_cols:
+            nat_filters.append(Case.NationalID.ilike(nat_q))
+        if nat_filters:
+            query = query.filter(or_(*nat_filters))
+
+    if lat and lat.strip() and "Latitude" in case_cols:
         query = query.filter(Case.Latitude.ilike(f"%{lat.strip()}%"))
-    if lon and lon.strip():
+    if lon and lon.strip() and "Longitude" in case_cols:
         query = query.filter(Case.Longitude.ilike(f"%{lon.strip()}%"))
 
-    if offender and offender.strip():
+    if offender and offender.strip() and "OffenderName" in off_cols:
         query = query.filter(Offender.OffenderName.ilike(f"%{offender.strip()}%"))
+
     if address and address.strip():
         addr_filter = f"%{address.strip()}%"
-        query = query.filter(or_(
-            Location.FullAddress.ilike(addr_filter),
-            Location.StreetName.ilike(addr_filter),
-            Offender.OffenderAddress.ilike(addr_filter)
-        ))
+        addr_filters = []
+        if "FullAddress" in loc_cols:
+            addr_filters.append(Location.FullAddress.ilike(addr_filter))
+        if "StreetName" in loc_cols:
+            addr_filters.append(Location.StreetName.ilike(addr_filter))
+        if "OffenderAddress" in off_cols:
+            addr_filters.append(Offender.OffenderAddress.ilike(addr_filter))
+        if addr_filters:
+            query = query.filter(or_(*addr_filters))
 
     effective_vtype = (v_type or vtype or "").strip()
-    if effective_vtype:
+    if effective_vtype and "ViolationTypeName" in vtype_cols:
         query = query.filter(ViolationType.ViolationTypeName.ilike(f"%{effective_vtype}%"))
 
     if q and q.strip():
         clean_q = q.strip()
         search_filter = f"%{clean_q}%"
-        try:
-            numeric_val = float(clean_q)
-        except Exception:
-            numeric_val = None
-
-        filters = [
-            Case.VariableCode.ilike(search_filter),
-            Case.CaseNumber.ilike(search_filter),
-            Case.DecisionNumber.ilike(search_filter),
-            Case.Latitude.ilike(search_filter),
-            Case.Longitude.ilike(search_filter),
-            Offender.OffenderName.ilike(search_filter),
-            Location.FullAddress.ilike(search_filter),
-            Location.DistrictName.ilike(search_filter),
-            ViolationType.ViolationTypeName.ilike(search_filter)
-        ]
-        if numeric_val is not None:
-            filters.append(Offender.NationalID == numeric_val)
-        query = query.filter(or_(*filters))
+        filters = []
+        if "VariableCode" in case_cols:
+            filters.append(Case.VariableCode.ilike(search_filter))
+        if "CaseNumber" in case_cols:
+            filters.append(Case.CaseNumber.ilike(search_filter))
+        if "DecisionNumber" in case_cols:
+            filters.append(Case.DecisionNumber.ilike(search_filter))
+        if "Latitude" in case_cols:
+            filters.append(Case.Latitude.ilike(search_filter))
+        if "Longitude" in case_cols:
+            filters.append(Case.Longitude.ilike(search_filter))
+        if "NationalID" in case_cols:
+            filters.append(Case.NationalID.ilike(search_filter))
+        if "OffenderName" in off_cols:
+            filters.append(Offender.OffenderName.ilike(search_filter))
+        if "NationalID" in off_cols:
+            filters.append(Offender.NationalID.ilike(search_filter))
+        if "FullAddress" in loc_cols:
+            filters.append(Location.FullAddress.ilike(search_filter))
+        if "StreetName" in loc_cols:
+            filters.append(Location.StreetName.ilike(search_filter))
+        if "DistrictName" in loc_cols:
+            filters.append(Location.DistrictName.ilike(search_filter))
+        if "ViolationTypeName" in vtype_cols:
+            filters.append(ViolationType.ViolationTypeName.ilike(search_filter))
+        if filters:
+            query = query.filter(or_(*filters))
 
     if status and status.strip():
-        query = query.filter(ExecutionStatus.ExecutionStatusName == status.strip())
-    if district and district.strip():
-        query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
-    if year:
-        query = query.filter(Case.year == year)
+        st_val = status.strip()
+        st_filters = []
+        if "ExecutionStatusName" in exec_cols:
+            st_filters.append(ExecutionStatus.ExecutionStatusName == st_val)
+        if "procedure" in exec_cols:
+            st_filters.append(ExecutionStatus.procedure == st_val)
+        if st_filters:
+            query = query.filter(or_(*st_filters))
 
-    return query.order_by(Case.SerialNo.desc())
+    if district and district.strip() and "DistrictName" in loc_cols:
+        query = query.filter(Location.DistrictName.ilike(f"%{district.strip()}%"))
+
+    if year is not None and str(year).strip() != "" and "year" in case_cols:
+        query = query.filter(Case.year == str(year).strip())
+
+    return query.order_by(Case.CaseID.desc())
+
 
 class LoginPayload(BaseModel):
     username: str
     password: str
+
 
 class UserPayload(BaseModel):
     Username: str
@@ -381,25 +476,26 @@ class UserPayload(BaseModel):
     Role: Optional[str] = "DataEntry"
     IsActive: Optional[bool] = True
 
+
 class CaseFullPayload(BaseModel):
-    SerialNo: Optional[int] = None
+    SerialNo: Optional[str] = None
     VariableCode: Optional[str] = ""
     VariableDate: Optional[str] = ""
     CaseNumber: Optional[str] = ""
     CaseDate: Optional[str] = ""
-    year: Optional[int] = None
+    year: Optional[str] = None
     StopNumber: Optional[str] = ""
     AdminNumber: Optional[str] = ""
     DecisionNumber: Optional[str] = ""
     DecisionDate: Optional[str] = ""
-    AreaSize: Optional[float] = None
+    AreaSize: Optional[str] = None
     Notes: Optional[str] = ""
     Latitude: Optional[str] = ""
     Longitude: Optional[str] = ""
     OffenderName: Optional[str] = ""
-    OffenderNationalID: Optional[float] = None
+    OffenderNationalID: Optional[str] = None
     OffenderAddress: Optional[str] = ""
-    Phone: Optional[float] = None
+    Phone: Optional[str] = None
     OffenderNotes: Optional[str] = ""
     StreetName: Optional[str] = ""
     DistrictName: Optional[str] = ""
@@ -411,19 +507,19 @@ class CaseFullPayload(BaseModel):
     ExecNotes: Optional[str] = ""
     HasAppeal: Optional[bool] = False
     CourtDecision: Optional[str] = ""
-    CourtDecisionDate: Optional[float] = None
-    DeputyGovernorDecision: Optional[int] = None
-    DateDeputyGovernorDecision: Optional[float] = None
-    FinalJudgement: Optional[float] = None
-    FinalJudgementDate: Optional[float] = None
-    TheFine: Optional[float] = None
-    NonExecutionNumber: Optional[int] = None
-    DepartmentIssueDate: Optional[float] = None
-    FelonyNumber: Optional[float] = None
+    CourtDecisionDate: Optional[str] = None
+    DeputyGovernorDecision: Optional[str] = None
+    DateDeputyGovernorDecision: Optional[str] = None
+    FinalJudgement: Optional[str] = None
+    FinalJudgementDate: Optional[str] = None
+    TheFine: Optional[str] = None
+    NonExecutionNumber: Optional[str] = None
+    DepartmentIssueDate: Optional[str] = None
+    FelonyNumber: Optional[str] = None
     JudgementNotes: Optional[str] = ""
     ReconciliationNumber: Optional[str] = ""
     ReconciliationDate: Optional[str] = ""
-    FineAmount: Optional[float] = None
+    FineAmount: Optional[str] = None
     ReconNotes: Optional[str] = ""
     ViolationTypeName: Optional[str] = ""
     ViolationDescription: Optional[str] = ""
